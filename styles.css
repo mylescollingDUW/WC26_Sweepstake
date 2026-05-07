@@ -1078,6 +1078,16 @@ main {
   gap: var(--s-3);
   flex: 1;
 }
+.prize-card .winner-row.stacked {
+  align-items: flex-start;
+}
+.prize-card .winners-stack {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-2);
+  min-width: 0;
+  flex: 1;
+}
 .prize-card .winner-info {
   display: flex; align-items: center; gap: var(--s-3);
   min-width: 0;
@@ -1086,12 +1096,15 @@ main {
   font-family: var(--font-serif);
   font-weight: 600;
   font-style: italic;
-  font-size: var(--fs-xl);
+  font-size: var(--fs-lg);
   color: var(--ink);
-  letter-spacing: -0.4px;
+  letter-spacing: -0.3px;
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
   display: block;
-  line-height: 1.05;
+  line-height: 1.1;
+}
+.prize-card .winner-row.stacked .winner-info .team {
+  font-size: var(--fs-md);
 }
 .prize-card .winner-info .participant {
   font-family: var(--font-mono);
@@ -1108,15 +1121,23 @@ main {
   display: flex; flex-direction: column;
   min-width: 0;
 }
+.prize-card .winners-overflow {
+  font-family: var(--font-mono);
+  font-size: var(--fs-2xs);
+  color: var(--ink-3);
+  letter-spacing: 1px;
+  text-transform: uppercase;
+  padding-left: calc(var(--flag-w, 30px) + var(--s-3));
+}
 .prize-card .stat {
   font-family: var(--font-mono);
-  font-size: var(--fs-xl);
+  font-size: var(--fs-lg);
   font-weight: 500;
   color: var(--ink);
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
   flex-shrink: 0;
-  letter-spacing: -0.5px;
+  letter-spacing: -0.4px;
   display: inline-flex;
   align-items: baseline;
   gap: 0;

@@ -108,13 +108,13 @@ const PRIZE_CATEGORIES = [
   { key: 'highScoringMatch', label: 'Highest scoring match',             resolver: prizeHighScoringMatch,                        unit: 'goals' },
   { key: 'highScoringDraw',  label: 'Most goals in a drawn match',       resolver: prizeHighScoringDraw,                         unit: 'goals' },
   { key: 'firstTo10',      label: 'First team to score 10 goals',        resolver: prizeFirstTo10,                               unit: 'goals' },
-  { key: 'shotsP90',       label: 'Most shots / 90',                     resolver: prizeMax('shotsP90',    { minMatches: 1 }),    unit: '/90' },
-  { key: 'sotP90',         label: 'Most shots on target / 90',           resolver: prizeMax('sotP90',      { minMatches: 1 }),    unit: '/90' },
-  { key: 'avgPoss',        label: 'Highest avg possession',              resolver: prizeMax('avgPossession', { minMatches: 1 }),  unit: '%' },
-  { key: 'foulsP90',       label: 'Most fouls / 90',                     resolver: prizeMax('foulsP90',    { minMatches: 1 }),    unit: '/90' },
-  { key: 'cardsP90',       label: 'Most cards / 90',                     resolver: prizeMax('cardsP90',    { minMatches: 1 }),    unit: '/90' },
-  { key: 'offsidesP90',    label: 'Most offsides / 90',                  resolver: prizeMax('offsidesP90', { minMatches: 1 }),    unit: '/90' },
-  { key: 'cornersP90',     label: 'Most corners / 90',                   resolver: prizeMax('cornersP90',  { minMatches: 1 }),    unit: '/90' },
+  { key: 'shotsP90',       label: 'Most shots / 90',                     resolver: prizeMax('shotsP90',    { minMatches: 1 }),    unit: '', decimals: 2 },
+  { key: 'sotP90',         label: 'Most shots on target / 90',           resolver: prizeMax('sotP90',      { minMatches: 1 }),    unit: '', decimals: 2 },
+  { key: 'avgPoss',        label: 'Highest avg possession',              resolver: prizeMax('avgPossession', { minMatches: 1 }),  unit: '%', decimals: 1 },
+  { key: 'foulsP90',       label: 'Most fouls / 90',                     resolver: prizeMax('foulsP90',    { minMatches: 1 }),    unit: '', decimals: 2 },
+  { key: 'cardsP90',       label: 'Most cards / 90',                     resolver: prizeMax('cardsP90',    { minMatches: 1 }),    unit: '', decimals: 2 },
+  { key: 'offsidesP90',    label: 'Most offsides / 90',                  resolver: prizeMax('offsidesP90', { minMatches: 1 }),    unit: '', decimals: 2 },
+  { key: 'cornersP90',     label: 'Most corners / 90',                   resolver: prizeMax('cornersP90',  { minMatches: 1 }),    unit: '', decimals: 2 },
 ];
 
 // ============================================================
@@ -1470,15 +1470,26 @@ function renderPrizeCards() {
       body = `<div class="empty">${escapeHtml(p.note || 'Awaiting data')}</div>`;
     } else {
       const valueDisplay = formatPrizeValueShort(top, p);
-      body = `
-        <div class="winner-row">
-          <div class="winner-info">
-            <span class="flag lg">${top.flag || flagFor(top.team)}</span>
-            <div class="meta-line">
-              <span class="team">${escapeHtml(top.team)}</span>
-              <span class="participant">${escapeHtml(top.participant || 'unassigned')}</span>
-            </div>
+      const MAX_VISIBLE_LEADERS = 3;
+      const visibleLeaders = leaders.slice(0, MAX_VISIBLE_LEADERS);
+      const overflow = Math.max(0, leaders.length - MAX_VISIBLE_LEADERS);
+      const isStacked = visibleLeaders.length > 1;
+      const stackedClass = isStacked ? ' stacked' : '';
+      const leaderRows = visibleLeaders.map(l => `
+        <div class="winner-info">
+          <span class="flag${isStacked ? '' : ' lg'}">${l.flag || flagFor(l.team)}</span>
+          <div class="meta-line">
+            <span class="team">${escapeHtml(l.team)}</span>
+            <span class="participant">${escapeHtml(l.participant || 'unassigned')}</span>
           </div>
+        </div>
+      `).join('');
+      const overflowRow = overflow > 0
+        ? `<div class="winners-overflow">+${overflow} more</div>`
+        : '';
+      body = `
+        <div class="winner-row${stackedClass}">
+          <div class="winners-stack">${leaderRows}${overflowRow}</div>
           ${valueDisplay ? `<div class="stat">${escapeHtml(valueDisplay)}</div>` : ''}
         </div>
         ${renderLeadBar(p, leadInfo, tieCount)}`;
@@ -1538,16 +1549,24 @@ function formatPrizeValue(item, prize) {
   // valueLabel (e.g. score breakdown for "Highest-scoring match").
   if (item.valueLabel) return item.valueLabel;
   if (item.value === '' || item.value == null) return '';
-  if (prize.unit) return item.value + ' ' + prize.unit;
-  return String(item.value);
+  const v = formatNumeric(item.value, prize);
+  if (prize.unit) return v + ' ' + prize.unit;
+  return v;
 }
 function formatPrizeValueShort(item, prize) {
   // Tight form for the prize-card grid: no valueLabel — that
   // text overflows the card. Always "<value> <unit>" or just
   // value, never the long contextual variant.
   if (item.value === '' || item.value == null) return '';
-  if (prize.unit) return item.value + ' ' + prize.unit;
-  return String(item.value);
+  const v = formatNumeric(item.value, prize);
+  if (prize.unit) return v + ' ' + prize.unit;
+  return v;
+}
+function formatNumeric(value, prize) {
+  if (typeof value === 'number' && prize && prize.decimals != null) {
+    return value.toFixed(prize.decimals);
+  }
+  return String(value);
 }
 
 // ---------- Race modal ----------
