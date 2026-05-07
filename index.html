@@ -181,7 +181,7 @@
 
   <footer>
     <div class="footer-line">&pound;20 buy-ins to charity. Prize pot funded separately.</div>
-    <div class="muted">Source: <code>tracker.json</code></div>
+    <div class="muted">Source: Google Sheet</div>
   </footer>
 
   <!-- ============================================================
@@ -218,20 +218,13 @@
       </header>
       <div class="drawer-body">
         <p class="drawer-help">
-          The dashboard reads <code>tracker.json</code> automatically when served from a local web server.
-          The tools below are for setup and ad-hoc loads.
+          The dashboard reads four tabs from a Google Sheet
+          (Participants / Match Data / Awards / Golden Boot Tracker).
+          Edit the Sheet, refresh this page.
         </p>
         <div class="drawer-actions">
-          <button id="reload-btn" class="btn" type="button">Reload tracker.json</button>
-          <label class="btn primary" for="file-input">
-            Load JSON file
-            <input id="file-input" type="file" accept=".json,application/json" hidden />
-          </label>
-          <button id="download-btn" class="btn" type="button">Download sample JSON</button>
+          <button id="reload-btn" class="btn primary" type="button">Reload from Sheet</button>
           <button id="sample-btn" class="btn ghost" type="button">Reset to sample data</button>
-        </div>
-        <div class="drawer-tip">
-          <strong>Tip.</strong> To enable auto-load, run <code>python -m http.server 8000</code> in the project folder and open <code>http://localhost:8000/</code>.
         </div>
       </div>
     </div>

@@ -2,7 +2,8 @@
  * WC 2026 Sweepstake Dashboard — control room
  * ------------------------------------------------------------
  * Architecture
- *   1. Load tracker.json (or embedded sample) -> normalize rows
+ *   1. Load four CSV tabs from a Google Sheet (or the embedded
+ *      sample) and normalise the rows
  *   2. computeTeamStats: roll up matches into per-team totals
  *      + per-90 derived stats
  *   3. resolveAllPrizes: each prize returns a *full ranked list*
@@ -11,29 +12,23 @@
  *   5. Render: ticker, carousel (groups OR knockouts), prize
  *      cards, leaderboard, participants
  *
- * Data model — tracker.json (single file, source of truth)
- *   teams       — [{group, team, entrant}]
- *   matches     — [{id, date, stage, homeTeam, awayTeam,
- *                   homeScore, awayScore, minutes,
- *                   homeShots/awayShots, homeSoT/awaySoT,
- *                   homePossession/awayPossession,
- *                   homeFouls/awayFouls,
- *                   homeYellow/awayYellow, homeRed/awayRed,
- *                   homeOffsides/awayOffsides,
- *                   homeCorners/awayCorners}]
- *   awards      — {winner: {player, country}, runnerup: ...,
- *                  third: ..., goldenBoot: ...}. Filled in
- *                  manually as announcements happen.
- *   goldenBoot  — [{player, country, goals}] — live top-scorer
- *                  list, kept up to date through the tournament
- *                  so the Golden Boot card shows the current
- *                  leader.
+ * Data source — a single Google Sheet, four tabs
+ *   Participants         — Group, Team, Entrant
+ *   Match Data           — Date, Stage, Home Team, Away Team,
+ *                          Home Score, Away Score, Minutes, then
+ *                          per-match stat-panel numbers (shots,
+ *                          SoT, possession %, fouls, yellows,
+ *                          reds, offsides, corners). The Goal
+ *                          Diff / Winning Team formula columns
+ *                          are ignored — the dashboard recomputes.
+ *   Awards               — manually filled in as announcements
+ *                          happen. Tournament Winner / 2nd /
+ *                          3rd / Golden Boot.
+ *   Golden Boot Tracker  — Player / Country / Goals — kept up to
+ *                          date through the tournament.
  *
- * Edit tracker.json (locally, in Excel via xlsx_to_json.py, or
- * directly on github.com) and refresh the page. The file picker
- * / sample download buttons live in the admin drawer (gear icon,
- * top-right) for ad-hoc loads — the dashboard itself is meant
- * to be passive viewing.
+ * Edit the Sheet (web, mobile, anywhere) and refresh the page.
+ * No commits, no deploys, no JSON.
  * ============================================================ */
 
 'use strict';
@@ -875,59 +870,111 @@ function resolveAllPrizes(state) {
 // ============================================================
 
 // ------------------------------------------------------------
-// tracker.json parser
+// Google Sheets source
 // ------------------------------------------------------------
-// The dashboard reads a single JSON file (`tracker.json`) as its
-// source of truth. The shape:
-//
-//   { version: 1,
-//     teams:   [ { group, team, entrant }, ... ],
-//     matches: [ { id, date, stage, homeTeam, awayTeam,
-//                  homeScore, awayScore, minutes,
-//                  homeShots, awayShots, homeSoT, awaySoT,
-//                  homePossession, awayPossession,
-//                  homeFouls, awayFouls,
-//                  homeYellow, awayYellow, homeRed, awayRed,
-//                  homeOffsides, awayOffsides,
-//                  homeCorners, awayCorners }, ... ],
-//     awards:  { winner: { player, country },
-//                runnerup: ..., third: ..., goldenBoot: ... },
-//     goldenBoot: [ { player, country, goals }, ... ] }
-//
-// Mutability: the Awards / Golden Boot blocks accept blank
-// `country` / `goals` until the data is known. Empty match score
-// means "fixture, not played yet".
-function parseTrackerJson(doc) {
-  const docTeams   = Array.isArray(doc && doc.teams)      ? doc.teams      : [];
-  const docMatches = Array.isArray(doc && doc.matches)    ? doc.matches    : [];
-  const docAwards  = (doc && typeof doc.awards === 'object' && doc.awards) ? doc.awards : {};
-  const docGB      = Array.isArray(doc && doc.goldenBoot) ? doc.goldenBoot : [];
+// Each tab is fetched as CSV via the GVIZ endpoint, which is
+// publicly readable as long as the Sheet is shared "Anyone with
+// the link can view". No API key required.
+const SHEET_ID = '1bwXMIDUFiwmr-SjUsHon9vwXwKmpvQV6';
+const SHEET_TABS = {
+  participants: 'Participants',
+  matches:      'Match Data',
+  awards:       'Awards',
+  goldenBoot:   'Golden Boot Tracker',
+};
+function sheetTabUrl(name) {
+  // Cache-buster on every load so edits reflect within seconds.
+  const t = Date.now();
+  return 'https://docs.google.com/spreadsheets/d/' + SHEET_ID
+       + '/gviz/tq?tqx=out:csv&sheet=' + encodeURIComponent(name)
+       + '&_t=' + t;
+}
 
-  // Awards — copy through, ensuring all 4 keys exist.
+const AWARD_KEY_BY_LABEL = {
+  'Tournament Winner':        'winner',
+  '2nd Place':                'runnerup',
+  '3rd Place':                'third',
+  'Golden Boot (Top Scorer)': 'goldenBoot',
+};
+
+// Minimal RFC 4180 CSV parser. Handles quoted fields, escaped
+// quotes (""), and CRLF line endings. Treats leading whitespace
+// inside an unquoted field as significant — fine for our data.
+function parseCsv(text) {
+  const rows = [];
+  let row = [], field = '', inQuotes = false;
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i];
+    if (inQuotes) {
+      if (c === '"') {
+        if (text[i + 1] === '"') { field += '"'; i++; }
+        else inQuotes = false;
+      } else {
+        field += c;
+      }
+    } else if (c === '"') {
+      inQuotes = true;
+    } else if (c === ',') {
+      row.push(field); field = '';
+    } else if (c === '\r') {
+      // skip — wait for the \n
+    } else if (c === '\n') {
+      row.push(field); rows.push(row);
+      row = []; field = '';
+    } else {
+      field += c;
+    }
+  }
+  if (field !== '' || row.length) { row.push(field); rows.push(row); }
+  if (!rows.length) return [];
+  const headers = rows[0].map(h => h.trim());
+  return rows.slice(1)
+    .filter(r => r.some(v => String(v).trim() !== ''))
+    .map(r => Object.fromEntries(headers.map((h, i) => [h, r[i] != null ? r[i] : ''])));
+}
+
+function parseSheetCsvs(csvs) {
+  const participants = parseCsv(csvs.participants);
+  const matches      = parseCsv(csvs.matches);
+  const awards       = parseCsv(csvs.awards);
+  const goldenBoot   = parseCsv(csvs.goldenBoot);
+  return buildState({ participants, matches, awards, goldenBoot });
+}
+
+// Internal: takes already-parsed row arrays (one per tab) and
+// returns the shape the rest of the app consumes.
+function buildState({ participants, matches, awards: awardRows, goldenBoot: gbRows }) {
   const awards = {
-    winner:     readAward(docAwards.winner),
-    runnerup:   readAward(docAwards.runnerup),
-    third:      readAward(docAwards.third),
-    goldenBoot: readAward(docAwards.goldenBoot),
+    winner:     { player: '', country: '' },
+    runnerup:   { player: '', country: '' },
+    third:      { player: '', country: '' },
+    goldenBoot: { player: '', country: '' },
   };
+  for (const row of awardRows) {
+    const key = AWARD_KEY_BY_LABEL[String(row.Award || '').trim()];
+    if (!key) continue;
+    awards[key] = {
+      player:  String(row['Player (if applicable)'] || '').trim(),
+      country: String(row['Country / Team'] || '').trim(),
+    };
+  }
 
-  // Podium positions from awards drive FinalPosition on Teams.
   const podiumByCountry = {};
   if (awards.winner.country)   podiumByCountry[awards.winner.country]   = 1;
   if (awards.runnerup.country) podiumByCountry[awards.runnerup.country] = 2;
   if (awards.third.country)    podiumByCountry[awards.third.country]    = 3;
 
-  const teams = docTeams
-    .filter(t => String(t && t.team || '').trim())
-    .map(t => {
-      const team = String(t.team).trim();
+  const teams = participants
+    .filter(r => String(r.Team || '').trim())
+    .map(r => {
+      const team = String(r.Team).trim();
       return {
         TeamID: team,
         Team: team,
-        Group: String(t.group || '').trim(),
+        Group: String(r.Group || '').trim(),
         FIFA_Rank: 0,
         FlagEmoji: '',
-        Participant: String(t.entrant || '').trim(),
+        Participant: String(r.Entrant || '').trim(),
         Eliminated: false,
         EliminationStage: '',
         EliminationDate: '',
@@ -937,44 +984,47 @@ function parseTrackerJson(doc) {
 
   const groupByTeam = Object.fromEntries(teams.map(t => [t.Team, t.Group]));
 
-  const matches = docMatches
-    .filter(m => m && String(m.homeTeam || '').trim() && String(m.awayTeam || '').trim())
-    .map((m, i) => {
-      const stage = canonicalStage(m.stage);
-      const homeTeam = String(m.homeTeam).trim();
-      const awayTeam = String(m.awayTeam).trim();
+  const normalizedMatches = matches
+    .filter(r => String(r['Home Team'] || '').trim() && String(r['Away Team'] || '').trim())
+    .map((r, i) => {
+      const stage = canonicalStage(r.Stage);
+      const homeTeam = String(r['Home Team']).trim();
+      const awayTeam = String(r['Away Team']).trim();
       const group = isGroupStage(stage) ? (groupByTeam[homeTeam] || '') : '';
-      const minutes = m.minutes == null || m.minutes === '' ? 90 : Number(m.minutes) || 90;
+      const minutesRaw = r.Minutes;
+      const minutes = minutesRaw === '' || minutesRaw == null ? 90 : Number(minutesRaw) || 90;
+      const homeScore = r['Home Score'] === '' || r['Home Score'] == null ? '' : Number(r['Home Score']);
+      const awayScore = r['Away Score'] === '' || r['Away Score'] == null ? '' : Number(r['Away Score']);
       return {
-        MatchID: m.id || ('M' + String(i + 1).padStart(3, '0')),
-        Date: m.date ? new Date(m.date) : '',
+        MatchID: 'M' + String(i + 1).padStart(3, '0'),
+        Date: r.Date ? new Date(r.Date) : '',
         Stage: stage,
         Group: group,
         HomeTeam: homeTeam,
         AwayTeam: awayTeam,
         HomeFlagEmoji: '',
         AwayFlagEmoji: '',
-        HomeGoals: m.homeScore == null || m.homeScore === '' ? '' : m.homeScore,
-        AwayGoals: m.awayScore == null || m.awayScore === '' ? '' : m.awayScore,
+        HomeGoals: isFinite(homeScore) ? homeScore : '',
+        AwayGoals: isFinite(awayScore) ? awayScore : '',
         Minutes: minutes,
         HomePenaltyGoals: '',
         AwayPenaltyGoals: '',
-        HomeShots:      n(m.homeShots),
-        AwayShots:      n(m.awayShots),
-        HomeSoT:        n(m.homeSoT),
-        AwaySoT:        n(m.awaySoT),
-        HomePossession: n(m.homePossession),
-        AwayPossession: n(m.awayPossession),
-        HomeFouls:      n(m.homeFouls),
-        AwayFouls:      n(m.awayFouls),
-        HomeYellowCards: n(m.homeYellow),
-        AwayYellowCards: n(m.awayYellow),
-        HomeRedCards:    n(m.homeRed),
-        AwayRedCards:    n(m.awayRed),
-        HomeOffsides:    n(m.homeOffsides),
-        AwayOffsides:    n(m.awayOffsides),
-        HomeCorners:     n(m.homeCorners),
-        AwayCorners:     n(m.awayCorners),
+        HomeShots:        n(r['Home Shots']),
+        AwayShots:        n(r['Away Shots']),
+        HomeSoT:          n(r['Home SoT']),
+        AwaySoT:          n(r['Away SoT']),
+        HomePossession:   n(r['Home Possession %']),
+        AwayPossession:   n(r['Away Possession %']),
+        HomeFouls:        n(r['Home Fouls']),
+        AwayFouls:        n(r['Away Fouls']),
+        HomeYellowCards:  n(r['Home Yellow']),
+        AwayYellowCards:  n(r['Away Yellow']),
+        HomeRedCards:     n(r['Home Red']),
+        AwayRedCards:     n(r['Away Red']),
+        HomeOffsides:     n(r['Home Offsides']),
+        AwayOffsides:     n(r['Away Offsides']),
+        HomeCorners:      n(r['Home Corners']),
+        AwayCorners:      n(r['Away Corners']),
         HomePenaltiesConceded: 0,
         AwayPenaltiesConceded: 0,
         HomeNotableEvents: '',
@@ -984,97 +1034,33 @@ function parseTrackerJson(doc) {
       };
     });
 
-  const goldenBoot = docGB
-    .filter(g => g && String(g.player || '').trim())
-    .map(g => ({
-      player: String(g.player).trim(),
-      country: String(g.country || '').trim(),
-      goals: n(g.goals),
+  const goldenBoot = gbRows
+    .filter(r => String(r.Player || '').trim())
+    .map(r => ({
+      player:  String(r.Player).trim(),
+      country: String(r.Country || '').trim(),
+      goals:   n(r.Goals),
     }))
     .sort((a, b) => b.goals - a.goals);
 
-  return { teams, matches, prizes: [], awards, goldenBoot };
+  return { teams, matches: normalizedMatches, prizes: [], awards, goldenBoot };
 }
 
-function readAward(a) {
-  if (!a || typeof a !== 'object') return { player: '', country: '' };
-  return {
-    player: String(a.player || '').trim(),
-    country: String(a.country || '').trim(),
-  };
-}
-
-function buildSampleJson() {
-  const { teams, matches, awards, goldenBoot } = generateSampleData();
-  return {
-    version: 1,
-    teams: teams.map(t => ({
-      group: t.Group,
-      team: t.Team,
-      entrant: t.Participant,
-    })),
-    matches: matches.map(m => ({
-      id: m.MatchID,
-      date: m.Date instanceof Date ? fmtDate(m.Date) : (m.Date || null),
-      stage: m.Stage,
-      homeTeam: m.HomeTeam,
-      awayTeam: m.AwayTeam,
-      homeScore: m.HomeGoals === '' ? null : m.HomeGoals,
-      awayScore: m.AwayGoals === '' ? null : m.AwayGoals,
-      minutes: m.Minutes,
-      homeShots: m.HomeShots, awayShots: m.AwayShots,
-      homeSoT: m.HomeSoT, awaySoT: m.AwaySoT,
-      homePossession: m.HomePossession, awayPossession: m.AwayPossession,
-      homeFouls: m.HomeFouls, awayFouls: m.AwayFouls,
-      homeYellow: m.HomeYellowCards, awayYellow: m.AwayYellowCards,
-      homeRed: m.HomeRedCards, awayRed: m.AwayRedCards,
-      homeOffsides: m.HomeOffsides, awayOffsides: m.AwayOffsides,
-      homeCorners: m.HomeCorners, awayCorners: m.AwayCorners,
-    })),
-    awards: {
-      winner:     awards.winner     || { player: '', country: '' },
-      runnerup:   awards.runnerup   || { player: '', country: '' },
-      third:      awards.third      || { player: '', country: '' },
-      goldenBoot: awards.goldenBoot || { player: '', country: '' },
-    },
-    goldenBoot: goldenBoot.map(g => ({ player: g.player, country: g.country, goals: g.goals })),
-  };
-}
-
-function downloadSampleJson() {
-  const blob = new Blob([JSON.stringify(buildSampleJson(), null, 2)], { type: 'application/json' });
-  const a = document.createElement('a');
-  a.href = URL.createObjectURL(blob);
-  a.download = 'tracker.json';
-  document.body.appendChild(a);
-  a.click();
-  a.remove();
-  setTimeout(() => URL.revokeObjectURL(a.href), 5000);
-  setStatus('Sample tracker.json downloaded. Save it next to index.html.', 'ok');
-}
-
-async function loadFromFile(file) {
+async function loadFromSheet(silent) {
   try {
-    setStatus('Reading ' + file.name + '…');
-    const text = await file.text();
-    const doc = JSON.parse(text);
-    setData(parseTrackerJson(doc), file.name);
+    if (!silent) setStatus('Loading from Google Sheet…');
+    const fetchTab = name => fetch(sheetTabUrl(name), { cache: 'no-store' })
+      .then(r => { if (!r.ok) throw new Error('HTTP ' + r.status + ' on tab "' + name + '"'); return r.text(); });
+    const [participants, matches, awards, goldenBoot] = await Promise.all([
+      fetchTab(SHEET_TABS.participants),
+      fetchTab(SHEET_TABS.matches),
+      fetchTab(SHEET_TABS.awards),
+      fetchTab(SHEET_TABS.goldenBoot),
+    ]);
+    setData(parseSheetCsvs({ participants, matches, awards, goldenBoot }), 'Google Sheet');
   } catch (e) {
-    console.error(e);
-    setStatus('Failed to read JSON: ' + e.message, 'error');
-  }
-}
-
-async function loadFromDataFolder(silent) {
-  try {
-    if (!silent) setStatus('Loading tracker.json…');
-    const res = await fetch('tracker.json', { cache: 'no-store' });
-    if (!res.ok) throw new Error('HTTP ' + res.status);
-    const doc = await res.json();
-    setData(parseTrackerJson(doc), 'tracker.json');
-  } catch (e) {
-    console.warn('Auto-load failed:', e);
-    if (!silent) setStatus("Couldn't load tracker.json — showing sample data. Open the admin drawer to load a file manually.", 'error');
+    console.warn('Sheet load failed:', e);
+    if (!silent) setStatus("Couldn't load the Google Sheet — showing sample data. " + e.message, 'error');
     loadSample();
   }
 }
@@ -2276,21 +2262,8 @@ function init() {
   });
 
   // Drawer actions
-  $('#file-input').addEventListener('change', e => {
-    const file = e.target.files && e.target.files[0];
-    if (file) { loadFromFile(file); $('#admin-drawer').hidden = true; }
-  });
   $('#sample-btn').addEventListener('click', () => { loadSample(); $('#admin-drawer').hidden = true; });
-  $('#download-btn').addEventListener('click', downloadSampleJson);
-  $('#reload-btn').addEventListener('click', () => { loadFromDataFolder(); $('#admin-drawer').hidden = true; });
-
-  // Drag & drop anywhere
-  document.addEventListener('dragover', e => e.preventDefault());
-  document.addEventListener('drop', e => {
-    e.preventDefault();
-    const file = e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files[0];
-    if (file) loadFromFile(file);
-  });
+  $('#reload-btn').addEventListener('click', () => { loadFromSheet(); $('#admin-drawer').hidden = true; });
 
   // Carousel controls
   $('#carousel-prev').addEventListener('click', () => {
@@ -2362,9 +2335,9 @@ function init() {
 
   // First load
   if (location.protocol === 'http:' || location.protocol === 'https:') {
-    loadFromDataFolder();
+    loadFromSheet();
   } else {
-    setStatus("Showing sample data (browsers block reading tracker.json over file://). Run a local server, or use the admin drawer to load a file.", 'ok');
+    setStatus("Showing sample data (browsers block CORS requests over file://). Open via http://localhost or the live site.", 'ok');
     loadSample();
   }
 }

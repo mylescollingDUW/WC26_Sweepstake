@@ -1,120 +1,110 @@
 # WC 2026 Sweepstake — Control Room
 
 A single-page "control room" dashboard for an office World Cup
-sweepstake. Reads tournament data from `tracker.json`, computes
-per-team stats (including per-90 metrics from the Google match
-panel), and shows a live leader for every prize category — plus a
-Bloomberg-style match ticker, an auto-rotating group/knockout
-carousel, a knockout bracket, and a click-through "race view" for
-each prize.
+sweepstake. Reads tournament data live from a Google Sheet,
+computes per-team stats (including per-90 metrics from the
+Google match panel), and shows a live leader for every prize
+category — plus a Bloomberg-style match ticker, an auto-rotating
+group/knockout carousel, a knockout bracket, and a click-through
+"race view" for each prize.
 
 - 48 teams, £20 per person to charity, prize pot funded separately
 - 16 prize categories so every team has a realistic shot at something
 - Pure HTML / CSS / JS — no build step, no backend
-- One file (`tracker.json`) is the source of truth — edit it
-  during the tournament and refresh the page
+- Edits happen in the Google Sheet — no commits, no JSON, no faff
 
 ## Files
 
 ```
 .
-├── index.html         # Page layout
-├── styles.css         # Dark "control room" theme
-├── app.js             # Loading, stats, prize resolution, rendering
-├── tracker.json       # The source of truth — edit this
-├── Tracker.xlsx       # Excel reference / bulk-edit helper (optional)
+├── index.html       # Page layout
+├── styles.css       # Dark "control room" theme
+├── app.js           # Loading, stats, prize resolution, rendering
+├── Tracker.xlsx     # Snapshot of the Sheet at project start (reference only)
 └── README.md
 ```
 
-`tracker.json` is what the dashboard fetches at runtime. `Tracker.xlsx`
-is kept around as an Excel-friendly editor; if you prefer to edit
-in Excel, run `xlsx_to_json.py` (in the project's tools folder) to
-regenerate `tracker.json` from the workbook.
+The Google Sheet is the source of truth at runtime. `Tracker.xlsx`
+is kept around as a snapshot of the structure.
 
-## Editing tracker.json
+## Editing during the tournament
 
-Three workflows; pick whatever's most convenient at the moment.
+Open the Sheet (web or mobile app), change a cell, you're done.
+Refresh the dashboard to see the change.
 
-1. **Direct on github.com** (works on phone / anywhere). Open the
-   repo, click `tracker.json`, click the pencil icon, edit, hit
-   *Commit changes*. GitHub Pages serves the new file in ~30s.
-2. **Locally in any text editor.** Open `tracker.json`, change
-   values, save. Push the commit when you're done.
-3. **In Excel via `Tracker.xlsx`.** Edit the workbook normally,
-   then run `python xlsx_to_json.py` to regenerate `tracker.json`.
-   Push both files.
+The Sheet has four tabs the dashboard reads:
 
-## tracker.json structure
+### `Participants` tab
 
-```jsonc
-{
-  "version": 1,
+| Column | Notes |
+|---|---|
+| `Group`   | A–L |
+| `Team`    | Country name. Joined to Match Data Home/Away Team — must match exactly. |
+| `Entrant` | The owner. Drives the participant grid and prize chips. |
 
-  "teams": [
-    { "group": "A", "team": "Mexico", "entrant": "Alex" },
-    ...
-  ],
+### `Match Data` tab
 
-  "matches": [
-    {
-      "id":        "M001",
-      "date":      "2026-06-11",
-      "stage":     "Group",
-      "homeTeam":  "Mexico",  "awayTeam": "Saudi Arabia",
-      "homeScore": null,      "awayScore": null,
-      "minutes":   90,
+One row per match — group games **and** knockouts. Leave score
+columns blank for fixtures not yet played; the team-stat columns
+can stay blank too until the match completes.
 
-      "homeShots": 0,         "awayShots": 0,
-      "homeSoT": 0,           "awaySoT": 0,
-      "homePossession": 0,    "awayPossession": 0,
-      "homeFouls": 0,         "awayFouls": 0,
-      "homeYellow": 0,        "awayYellow": 0,
-      "homeRed": 0,           "awayRed": 0,
-      "homeOffsides": 0,      "awayOffsides": 0,
-      "homeCorners": 0,       "awayCorners": 0
-    },
-    ...
-  ],
+| Column | Notes |
+|---|---|
+| `Date`              | Match date. |
+| `Stage`             | `Group`, `Round of 32`, `Round of 16`, `Quarter Finals` (or `Quarter-finals`), `Semi Finals` (or `Semi-finals`), `Third Place Play-Off` (or `Third Place`), `Final`. |
+| `Home Team` / `Away Team` | Country names — must match `Participants.Team`. |
+| `Home Score` / `Away Score` | Blank if not played. |
+| `Minutes`           | `90` for group games. `120` if the knockout went to extra time. This is the per-90 denominator. Penalty-shootout stats are not recorded. |
+| `Home Shots` / `Away Shots` | From the Google stat panel. |
+| `Home SoT` / `Away SoT` | Shots on target. |
+| `Home Possession %` / `Away Possession %` | Whole numbers (e.g. `75`); both should sum to 100. |
+| `Home Fouls` / `Away Fouls` | |
+| `Home Yellow` / `Away Yellow` | |
+| `Home Red` / `Away Red` | |
+| `Home Offsides` / `Away Offsides` | |
+| `Home Corners` / `Away Corners` | |
+| `Goal Diff` / `Winning Team` | Sheet-side formula columns; the dashboard ignores them and recomputes. |
 
-  "awards": {
-    "winner":     { "player": "",           "country": "" },
-    "runnerup":   { "player": "",           "country": "" },
-    "third":      { "player": "",           "country": "" },
-    "goldenBoot": { "player": "Top scorer", "country": "Argentina" }
-  },
+> **Cards convention.** Record exactly what the Google match panel
+> shows. When a player picks up a 2nd yellow → red, Google
+> typically shows it as 2 yellows AND 1 red — record what you
+> see. The cards/90 metric is `Yellow * 1 + Red * 2` per 90
+> minutes played, so a 2Y → R incident scores 4 points. Fairer
+> than a single yellow.
 
-  "goldenBoot": [
-    { "player": "...", "country": "...", "goals": 0 }
-  ]
-}
-```
+### `Awards` tab
 
-Notes on values:
+Manually entered when announcements happen. Until a row's
+`Country / Team` is filled in, the corresponding prize card on
+the dashboard shows TBD. Once filled, the prize is final and the
+country's owner wins.
 
-- `homeScore` / `awayScore` use `null` for "not played yet". As
-  soon as a number is set, the match is considered played.
-- `minutes` is the per-90 denominator. `90` for group games. Use
-  `120` for knockouts that went to extra time. Penalty shootout
-  stats are not recorded.
-- `homePossession` / `awayPossession` are whole numbers (e.g.
-  `75`); both should sum to 100.
-- `stage` accepts `Group`, `Round of 32`, `Round of 16`,
-  `Quarter-finals` (or `Quarter Finals`), `Semi-finals` (or
-  `Semi Finals`), `Third Place` (or `Third Place Play-Off`),
-  `Final`. The dashboard normalises common variants.
-- **Cards convention**: record exactly what the Google match
-  panel shows. When a player picks up a 2nd yellow → red, Google
-  typically shows it as 2 yellows AND 1 red — record what you
-  see. The cards/90 metric is `Yellow*1 + Red*2 per 90 minutes
-  played`, so a 2Y → R incident scores 4 points. Fairer than a
-  single yellow.
+| Column | Notes |
+|---|---|
+| `Award`                  | One of: `Tournament Winner`, `2nd Place`, `3rd Place`, `Golden Boot (Top Scorer)`. Wording must match. Other rows are ignored. |
+| `Player (if applicable)` | Top scorer's name (used for the Golden Boot row). |
+| `Country / Team`         | The country whose entrant wins the prize. |
+| `Entrant`                | Auto-filled (Sheet-side formula). |
+
+### `Golden Boot Tracker` tab
+
+Optional but useful — keep this updated through the tournament so
+the Golden Boot card on the dashboard shows the current top
+scorer's country (and the race view shows the chasing pack).
+
+| Column | Notes |
+|---|---|
+| `Player`  | Free text. |
+| `Country` | Country name — must match `Participants.Team` for the entrant lookup to work. |
+| `Goals`   | Number. |
+| `Entrant` | Auto-filled. |
 
 ## Prize categories
 
 | Category | How it's calculated | Auto-confirms when |
 |---|---|---|
-| **1st / 2nd / 3rd Place** | `awards.winner / runnerup / third`. | `country` is filled in. |
-| **Golden Boot** | Live: top scorer in `goldenBoot`. Confirmed: `awards.goldenBoot`. | Awards entry filled. |
+| **1st / 2nd / 3rd Place** | `Awards` rows for each. | The country is filled in. |
+| **Golden Boot** | Live: top scorer in `Golden Boot Tracker`. Confirmed: `Awards`. | Awards row filled. |
 | **Largest Goal Difference** | Largest single-match winning margin. | Tournament complete. |
 | **Largest Negative Goal Difference** | Most negative aggregate goal difference (worst tournament-long GF − GA). | Tournament complete. |
 | **Highest Scoring Match** | Both teams in the match with most total goals share the prize. | Tournament complete. |
@@ -128,43 +118,36 @@ Notes on values:
 | **Most Offsides / 90** | Per-90 offsides. | Tournament complete. |
 | **Most Corners / 90** | Per-90 corners. | Tournament complete. |
 
-"Tournament complete" = `awards.winner.country` is filled, or the
-Final has a recorded result. Ties are always shown — no random
-tie-break.
+"Tournament complete" = the Awards sheet has a `Tournament Winner`
+country, or the Final has a recorded result. Ties are always
+shown — no random tie-break.
 
-## Running it
+## Hosting & sharing
 
-### On GitHub Pages (the live site)
+- Code is hosted on GitHub Pages (this repo).
+- Data is hosted in Google Sheets.
+- The Sheet must be shared as **Anyone with the link → Viewer**
+  for the dashboard to read it. Edit access stays restricted to
+  whoever you explicitly invite.
 
-1. Push to the repo — GitHub Pages serves it from `main` /
-   project root.
-2. Open the Pages URL.
-3. Edits to `tracker.json` (via web editor or `git push`) appear
-   on the live site within ~30 seconds.
+To swap the Sheet (e.g. for a different tournament): change
+`SHEET_ID` near the top of `app.js` and push.
 
-### Locally
+## Running it locally
 
 ```powershell
 # from the project folder
 python -m http.server 8000
 ```
 
-Open <http://localhost:8000/>. Reload the page after any edit
-to `tracker.json`.
-
-### Quick view (no server)
-
-Double-click `index.html`. Sample data renders immediately. The
-admin drawer (gear icon, top-right) lets you load a `tracker.json`
-file manually.
+Open <http://localhost:8000/>.
 
 ## Editing the dashboard
 
 - **Add a prize category:** append one entry to `PRIZE_CATEGORIES`
   in `app.js` and (if it's a new stat) extend `computeTeamStats`.
 - **Tune per-90 minimums:** the `prizeMax(..., { minMatches: 1 })`
-  options on each per-90 prize. Bump to 3 if you don't want
-  group-stage flukes leading the table on day 1.
+  options on each per-90 prize.
 - **Restyle:** every colour, spacing, type-scale, motion-curve
   token lives at the top of `styles.css` under `:root`.
 - **Carousel auto-rotate speed:** change `CAROUSEL_AUTO_MS` near
@@ -172,8 +155,8 @@ file manually.
 
 ## Notes
 
-- Final positions come from `awards`, not derived from the
-  bracket — set the country on each podium row manually after
-  the final.
-- The dashboard is read-only; all edits happen in the JSON.
+- Final positions come from the `Awards` tab, not derived from
+  the bracket — set the country on each podium row manually
+  after the final.
+- The dashboard is read-only; all edits happen in the Sheet.
 - Respects `prefers-reduced-motion`.
