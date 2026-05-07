@@ -1,0 +1,19 @@
+# Tool-local config / per-machine state
+.claude/
+.tool-cache/
+
+# OS noise
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Editor noise
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Backup / temp
+*~
+*.bak
+*.tmp

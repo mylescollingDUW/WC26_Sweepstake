@@ -1,0 +1,2372 @@
+/* ============================================================
+ * WC 2026 Sweepstake Dashboard — control room
+ * ------------------------------------------------------------
+ * Architecture
+ *   1. Load tracker.json (or embedded sample) -> normalize rows
+ *   2. computeTeamStats: roll up matches into per-team totals
+ *      + per-90 derived stats
+ *   3. resolveAllPrizes: each prize returns a *full ranked list*
+ *      (cards show top entry; modal shows the whole list)
+ *   4. detectPhase: group-stage vs knockout vs complete
+ *   5. Render: ticker, carousel (groups OR knockouts), prize
+ *      cards, leaderboard, participants
+ *
+ * Data model — tracker.json (single file, source of truth)
+ *   teams       — [{group, team, entrant}]
+ *   matches     — [{id, date, stage, homeTeam, awayTeam,
+ *                   homeScore, awayScore, minutes,
+ *                   homeShots/awayShots, homeSoT/awaySoT,
+ *                   homePossession/awayPossession,
+ *                   homeFouls/awayFouls,
+ *                   homeYellow/awayYellow, homeRed/awayRed,
+ *                   homeOffsides/awayOffsides,
+ *                   homeCorners/awayCorners}]
+ *   awards      — {winner: {player, country}, runnerup: ...,
+ *                  third: ..., goldenBoot: ...}. Filled in
+ *                  manually as announcements happen.
+ *   goldenBoot  — [{player, country, goals}] — live top-scorer
+ *                  list, kept up to date through the tournament
+ *                  so the Golden Boot card shows the current
+ *                  leader.
+ *
+ * Edit tracker.json (locally, in Excel via xlsx_to_json.py, or
+ * directly on github.com) and refresh the page. The file picker
+ * / sample download buttons live in the admin drawer (gear icon,
+ * top-right) for ad-hoc loads — the dashboard itself is meant
+ * to be passive viewing.
+ * ============================================================ */
+
+'use strict';
+
+// ============================================================
+// Constants
+// ============================================================
+
+const STAGE_ORDER = {
+  'Group Stage': 1, 'Group': 1,
+  'Round of 32': 2,
+  'Round of 16': 3,
+  'Quarter-finals': 4, 'Quarter-final': 4,
+  'Semi-finals': 5, 'Semi-final': 5,
+  'Third Place': 6, '3rd Place': 6, 'Third-place play-off': 6,
+  'Final': 7,
+};
+
+const KNOCKOUT_STAGES = [
+  { key: 'Round of 32',  label: 'Round of 32',         short: 'R32' },
+  { key: 'Round of 16',  label: 'Round of 16',         short: 'R16' },
+  { key: 'Quarter-finals', label: 'Quarter-finals',    short: 'QF'  },
+  { key: 'Semi-finals',  label: 'Semi-finals',         short: 'SF'  },
+  { key: 'Third Place',  label: 'Third-place play-off',short: '3rd' },
+  { key: 'Final',        label: 'Final',               short: 'F'   },
+];
+
+// Aliases accepted in the Stage column. Listed labels all collapse
+// onto the canonical keys used by STAGE_ORDER / KNOCKOUT_STAGES.
+const STAGE_ALIASES = {
+  'Quarter-final':         'Quarter-finals',
+  'Quarter Finals':        'Quarter-finals',
+  'Quarter-Finals':        'Quarter-finals',
+  'Semi-final':            'Semi-finals',
+  'Semi Finals':           'Semi-finals',
+  'Semi-Finals':           'Semi-finals',
+  '3rd Place':             'Third Place',
+  'Third Place Play-Off':  'Third Place',
+  'Third Place Play-off':  'Third Place',
+  'Third-place play-off':  'Third Place',
+  'Group Stage':           'Group',
+};
+
+// Country -> FIFA 3-letter code. Used as the visual identity in
+// every flag-shaped slot. We deliberately don't render emoji
+// flags: regional-indicator pairs don't render on Windows Chrome
+// (the office environment), so any emoji-based design would
+// fall back to inconsistent letter pairs. Codes are intentional
+// editorial styling — newspaper match-report convention.
+const COUNTRY_CODE = {
+  'Mexico':'MEX', 'Saudi Arabia':'KSA', 'Cameroon':'CMR', 'Jamaica':'JAM',
+  'Canada':'CAN', 'Egypt':'EGY', 'Iceland':'ISL', 'Algeria':'ALG',
+  'USA':'USA', 'Wales':'WAL', 'Japan':'JPN', 'Costa Rica':'CRC',
+  'Argentina':'ARG', 'New Zealand':'NZL', 'Poland':'POL', 'Tunisia':'TUN',
+  'Brazil':'BRA', 'Switzerland':'SUI', 'Serbia':'SRB', 'Croatia':'CRO',
+  'France':'FRA', 'Germany':'GER', 'Australia':'AUS', 'South Korea':'KOR',
+  'Spain':'ESP', 'Belgium':'BEL', 'Morocco':'MAR', 'Ghana':'GHA',
+  'England':'ENG', 'Netherlands':'NED', 'Portugal':'POR', 'Uruguay':'URU',
+  'Italy':'ITA', 'Denmark':'DEN', 'Ecuador':'ECU', 'Iran':'IRN',
+  'Colombia':'COL', 'Sweden':'SWE', 'Nigeria':'NGA', 'Qatar':'QAT',
+  'Norway':'NOR', 'Czech Republic':'CZE', 'Ivory Coast':'CIV', 'Panama':'PAN',
+  'Austria':'AUT', 'Turkey':'TUR', 'South Africa':'RSA', 'Bolivia':'BOL',
+};
+// Backwards-compat: callers still reference FLAG_LOOKUP, so
+// keep the symbol alive but make it return the country code.
+const FLAG_LOOKUP = COUNTRY_CODE;
+
+// Prize categories — declarative. Adding a new one is one entry.
+// Each resolver returns: { ranked: [...], leaderRank: <value>, isFinal?: bool, note?: string }
+const PRIZE_CATEGORIES = [
+  { key: 'winner',         label: '1st Place',                podium: 1, resolver: prizeFinalPosition(1), unit: '' },
+  { key: 'runnerup',       label: '2nd Place',                podium: 2, resolver: prizeFinalPosition(2), unit: '' },
+  { key: 'third',          label: '3rd Place',                podium: 3, resolver: prizeFinalPosition(3), unit: '' },
+  { key: 'goldenBoot',     label: 'Golden Boot',                         resolver: prizeGoldenBoot,                              unit: 'goals' },
+  { key: 'biggestWin',     label: 'Largest goal difference',             resolver: prizeMax('biggestWinMargin',  { minValue: 1 }), unit: 'margin' },
+  { key: 'biggestLoss',    label: 'Largest negative goal difference',    resolver: prizeMin('goalDifference', { minMatches: 1 }),  unit: 'GD' },
+  { key: 'highScoringMatch', label: 'Highest scoring match',             resolver: prizeHighScoringMatch,                        unit: 'goals' },
+  { key: 'highScoringDraw',  label: 'Most goals in a drawn match',       resolver: prizeHighScoringDraw,                         unit: 'goals' },
+  { key: 'firstTo10',      label: 'First team to score 10 goals',        resolver: prizeFirstTo10,                               unit: 'goals' },
+  { key: 'shotsP90',       label: 'Most shots / 90',                     resolver: prizeMax('shotsP90',    { minMatches: 1 }),    unit: '/90' },
+  { key: 'sotP90',         label: 'Most shots on target / 90',           resolver: prizeMax('sotP90',      { minMatches: 1 }),    unit: '/90' },
+  { key: 'avgPoss',        label: 'Highest avg possession',              resolver: prizeMax('avgPossession', { minMatches: 1 }),  unit: '%' },
+  { key: 'foulsP90',       label: 'Most fouls / 90',                     resolver: prizeMax('foulsP90',    { minMatches: 1 }),    unit: '/90' },
+  { key: 'cardsP90',       label: 'Most cards / 90',                     resolver: prizeMax('cardsP90',    { minMatches: 1 }),    unit: '/90' },
+  { key: 'offsidesP90',    label: 'Most offsides / 90',                  resolver: prizeMax('offsidesP90', { minMatches: 1 }),    unit: '/90' },
+  { key: 'cornersP90',     label: 'Most corners / 90',                   resolver: prizeMax('cornersP90',  { minMatches: 1 }),    unit: '/90' },
+];
+
+// ============================================================
+// State
+// ============================================================
+
+const STATE = {
+  teams: [],
+  matches: [],
+  prizes: [],
+  awards: {},               // keyed by prize key — see AWARD_KEY_BY_LABEL
+  goldenBoot: [],           // [{player, country, goals}], sorted desc
+  stats: new Map(),
+  prizeResults: [],
+  phase: 'group',           // 'group' | 'knockout' | 'complete'
+  carouselMode: 'group',    // mirrors phase but separate so we can flip explicitly
+  carouselIndex: 0,
+  carouselTimer: null,
+  carouselPlaying: true,
+  filter: '',
+  sortKey: 'points',
+  sortDir: 'desc',
+  ownersSort: 'prizes',
+  hasLanded: false,
+  spotlightTimer: null,
+};
+const CAROUSEL_AUTO_MS = 7000;
+
+// ============================================================
+// Helpers
+// ============================================================
+
+const $  = sel => document.querySelector(sel);
+const $$ = sel => Array.from(document.querySelectorAll(sel));
+
+function setStatus(msg, kind) {
+  const el = $('#status');
+  el.textContent = msg || '';
+  el.className = 'status ' + (kind || '');
+}
+function n(v) { return Number(v) || 0; }
+function fmtDate(d) {
+  if (!d) return '';
+  if (d instanceof Date && !isNaN(d)) return d.toISOString().slice(0, 10);
+  return String(d);
+}
+function fmtShortDate(d) {
+  const dt = d instanceof Date ? d : (d ? new Date(d) : null);
+  if (!dt || isNaN(dt)) return String(d || '');
+  return dt.toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
+}
+function escapeHtml(s) {
+  return String(s ?? '')
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+}
+function parseBool(v) {
+  if (typeof v === 'boolean') return v;
+  if (typeof v === 'number') return v !== 0;
+  if (typeof v === 'string') {
+    const s = v.trim().toLowerCase();
+    return s === 'true' || s === 'yes' || s === 'y' || s === '1';
+  }
+  return false;
+}
+function flagFor(team, _override) {
+  // Always render the 3-letter country code regardless of any
+  // workbook FlagEmoji column — emoji rendering is unreliable on
+  // Windows Chrome, and codes give us a consistent design.
+  return COUNTRY_CODE[team] || (team || '').slice(0, 3).toUpperCase() || '—';
+}
+function canonicalStage(s) {
+  const t = String(s || '').trim();
+  return STAGE_ALIASES[t] || t;
+}
+function isGroupStage(s) {
+  const c = canonicalStage(s);
+  return c === 'Group' || c === 'Group Stage';
+}
+function hasResult(m) {
+  return m.HomeGoals !== '' && m.HomeGoals != null
+      && m.AwayGoals !== '' && m.AwayGoals != null;
+}
+
+// ============================================================
+// Sample data
+// ------------------------------------------------------------
+// Embedded so the dashboard renders immediately on first load
+// (or under file://). 48 teams, 24 participants (2 teams each),
+// 72 group-stage matches with deterministic plausible scores
+// and per-90 stats derived from FIFA-rank gap.
+// ============================================================
+
+function generateSampleData() {
+  const TEAMS_RAW = [
+    ['Mexico','A',13],['Saudi Arabia','A',56],['Cameroon','A',41],['Jamaica','A',64],
+    ['Canada','B',31],['Egypt','B',36],['Iceland','B',70],['Algeria','B',38],
+    ['USA','C',16],['Wales','C',28],['Japan','C',18],['Costa Rica','C',50],
+    ['Argentina','D',1],['New Zealand','D',95],['Poland','D',33],['Tunisia','D',39],
+    ['Brazil','E',5],['Switzerland','E',19],['Serbia','E',30],['Croatia','E',7],
+    ['France','F',2],['Germany','F',16],['Australia','F',25],['South Korea','F',22],
+    ['Spain','G',8],['Belgium','G',4],['Morocco','G',13],['Ghana','G',60],
+    ['England','H',5],['Netherlands','H',7],['Portugal','H',9],['Uruguay','H',11],
+    ['Italy','I',10],['Denmark','I',19],['Ecuador','I',32],['Iran','I',20],
+    ['Colombia','J',12],['Sweden','J',26],['Nigeria','J',41],['Qatar','J',43],
+    ['Norway','K',41],['Czech Republic','K',35],['Ivory Coast','K',40],['Panama','K',47],
+    ['Austria','L',25],['Turkey','L',38],['South Africa','L',58],['Bolivia','L',84],
+  ];
+  const PARTICIPANTS = [
+    'Alex','Jamie','Sam','Taylor','Casey','Jordan','Morgan','Riley',
+    'Avery','Quinn','Drew','Skylar','Reese','Sage','Rowan','Emery',
+    'Parker','Blake','Cameron','Devon','Elliot','Finley','Harper','Logan',
+  ];
+
+  const teams = TEAMS_RAW.map((row, idx) => ({
+    TeamID: row[0],
+    Team: row[0],
+    Group: row[1],
+    FIFA_Rank: row[2],
+    FlagEmoji: '',
+    Participant: '',
+    Eliminated: false,
+    EliminationStage: '',
+    EliminationDate: '',
+    FinalPosition: '',
+  }));
+
+  // Deterministic shuffle, then assign participants round-robin.
+  const order = teams.map((_, i) => i);
+  shuffleSeeded(order, 42);
+  for (let i = 0; i < order.length; i++) {
+    teams[order[i]].Participant = PARTICIPANTS[i % PARTICIPANTS.length];
+  }
+
+  // 72 group-stage matches.
+  const matches = [];
+  let matchId = 1;
+  const groupStart = new Date(2026, 5, 11);
+  const pairings = [[0,1],[2,3],[0,2],[1,3],[0,3],[1,2]];
+
+  for (const groupCode of ['A','B','C','D','E','F','G','H','I','J','K','L']) {
+    const gTeams = teams.filter(t => t.Group === groupCode);
+    pairings.forEach(([a, b], idx) => {
+      const home = gTeams[a], away = gTeams[b];
+      const matchDay = Math.floor(idx / 2); // 0, 1, 2
+      const date = new Date(groupStart);
+      date.setDate(groupStart.getDate() + matchDay * 4 + (groupCode.charCodeAt(0) - 65) % 3);
+      // Sample state: matchdays 1 & 2 complete; matchday 3 left as
+      // fixtures so the demo sits in mid-tournament group stage.
+      const isPlayed = matchDay < 2;
+      const stats = isPlayed ? pseudoMatchStats(home, away, matchId * 17) : emptyMatchStats();
+      matches.push({
+        MatchID: 'M' + String(matchId++).padStart(3, '0'),
+        Date: date,
+        Stage: 'Group',
+        Group: groupCode,
+        HomeTeam: home.Team,
+        AwayTeam: away.Team,
+        HomeFlagEmoji: '',
+        AwayFlagEmoji: '',
+        Minutes: isPlayed ? 90 : 90,
+        ...stats,
+        HomeNotableEvents: '',
+        AwayNotableEvents: '',
+        Winner: '',
+        Notes: '',
+      });
+    });
+  }
+
+  // Placeholder R32 fixtures — date set, teams empty so they render
+  // as TBD in the bracket while group stage is still being played.
+  const r32Start = new Date(2026, 5, 27);
+  for (let i = 0; i < 16; i++) {
+    const d = new Date(r32Start);
+    d.setDate(r32Start.getDate() + Math.floor(i / 4));
+    matches.push({
+      MatchID: 'M' + String(matchId++).padStart(3, '0'),
+      Date: d,
+      Stage: 'Round of 32',
+      Group: '',
+      HomeTeam: '', AwayTeam: '',
+      HomeFlagEmoji: '', AwayFlagEmoji: '',
+      Minutes: 90,
+      ...emptyMatchStats(),
+      HomeNotableEvents: '', AwayNotableEvents: '',
+      Winner: '', Notes: '',
+    });
+  }
+
+  // Demo Golden Boot: one scorer per a few teams, deterministic
+  // counts so the live race shows something on first load.
+  const goldenBoot = [
+    { player: 'Sample Striker A', country: 'Argentina', goals: 4 },
+    { player: 'Sample Striker B', country: 'France',    goals: 3 },
+    { player: 'Sample Striker C', country: 'Spain',     goals: 3 },
+    { player: 'Sample Striker D', country: 'Brazil',    goals: 2 },
+    { player: 'Sample Striker E', country: 'Portugal',  goals: 2 },
+  ];
+
+  return { teams, matches, prizes: [], awards: {}, goldenBoot };
+}
+
+function mulberry32(a) {
+  return function () {
+    a |= 0; a = (a + 0x6D2B79F5) | 0;
+    let t = a;
+    t = Math.imul(t ^ (t >>> 15), t | 1);
+    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+function shuffleSeeded(arr, seed) {
+  const r = mulberry32(seed);
+  for (let i = arr.length - 1; i > 0; i--) {
+    const j = Math.floor(r() * (i + 1));
+    [arr[i], arr[j]] = [arr[j], arr[i]];
+  }
+}
+
+function emptyMatchStats() {
+  return {
+    HomeGoals: '', AwayGoals: '',
+    HomeShots: 0, AwayShots: 0,
+    HomeSoT: 0, AwaySoT: 0,
+    HomePossession: 0, AwayPossession: 0,
+    HomeFouls: 0, AwayFouls: 0,
+    HomeYellowCards: 0, AwayYellowCards: 0,
+    HomeRedCards: 0, AwayRedCards: 0,
+    HomeOffsides: 0, AwayOffsides: 0,
+    HomeCorners: 0, AwayCorners: 0,
+    HomePenaltyGoals: '', AwayPenaltyGoals: '',
+    HomePenaltiesConceded: 0, AwayPenaltiesConceded: 0,
+  };
+}
+
+function pseudoMatchStats(home, away, seed) {
+  const r = mulberry32(seed);
+  const gap = away.FIFA_Rank - home.FIFA_Rank;
+  const homeAdv = 0.3 + Math.max(-0.5, Math.min(0.5, gap / 60));
+  const hg = Math.max(0, Math.round(homeAdv + 1.2 + (r() - 0.5) * 2));
+  const ag = Math.max(0, Math.round(1.0 - homeAdv * 0.5 + (r() - 0.5) * 2));
+  // Plausible per-match stats. Possession sums to 100. Shots
+  // skew toward the home side roughly with rank-gap.
+  const homePoss = Math.round(50 + homeAdv * 25 + (r() - 0.5) * 10);
+  const awayPoss = 100 - homePoss;
+  const homeShots = 6 + Math.floor(r() * 12) + Math.max(0, hg);
+  const awayShots = 4 + Math.floor(r() * 10) + Math.max(0, ag);
+  return {
+    HomeGoals: hg,
+    AwayGoals: ag,
+    HomeShots: homeShots,
+    AwayShots: awayShots,
+    HomeSoT: Math.min(homeShots, hg + Math.floor(r() * 4) + 1),
+    AwaySoT: Math.min(awayShots, ag + Math.floor(r() * 4) + 1),
+    HomePossession: homePoss,
+    AwayPossession: awayPoss,
+    HomeFouls: 6 + Math.floor(r() * 10),
+    AwayFouls: 6 + Math.floor(r() * 10),
+    HomeYellowCards: Math.floor(r() * 4),
+    AwayYellowCards: Math.floor(r() * 4),
+    HomeRedCards: r() < 0.06 ? 1 : 0,
+    AwayRedCards: r() < 0.06 ? 1 : 0,
+    HomeOffsides: Math.floor(r() * 5),
+    AwayOffsides: Math.floor(r() * 5),
+    HomeCorners: Math.floor(r() * 8) + 1,
+    AwayCorners: Math.floor(r() * 8) + 1,
+    HomePenaltyGoals: '',
+    AwayPenaltyGoals: '',
+    HomePenaltiesConceded: 0,
+    AwayPenaltiesConceded: 0,
+  };
+}
+function prizeDescription(key) {
+  return ({
+    winner:           'Tournament winner',
+    runnerup:         'Runner-up',
+    third:            'Third place',
+    goldenBoot:       "Team of the tournament's top scorer",
+    biggestWin:       'Largest single-match winning margin',
+    biggestLoss:      'Most negative aggregate goal difference',
+    highScoringMatch: 'Both teams in the highest-scoring match',
+    highScoringDraw:  'Both teams in the highest-scoring draw',
+    firstTo10:        'First team to reach 10 cumulative goals scored',
+    shotsP90:         'Most shots per 90 minutes played',
+    sotP90:           'Most shots on target per 90 minutes played',
+    avgPoss:          'Highest average possession across the tournament',
+    foulsP90:         'Most fouls committed per 90 minutes played',
+    cardsP90:         'Most card points per 90 (yellow = 1, red = 2)',
+    offsidesP90:      'Most offsides per 90 minutes played',
+    cornersP90:       'Most corners per 90 minutes played',
+  })[key] || '';
+}
+
+// ============================================================
+// Stats — roll up matches into per-team totals.
+// ============================================================
+
+function computeTeamStats(teams, matches) {
+  const stats = new Map();
+  for (const t of teams) {
+    stats.set(t.Team, {
+      team: t.Team,
+      group: t.Group,
+      flag: flagFor(t.Team),
+      participant: t.Participant || '',
+      played: 0, wins: 0, draws: 0, losses: 0,
+      goalsFor: 0, goalsAgainst: 0, goalDifference: 0,
+      points: 0, groupPoints: 0,
+      biggestWinMargin: 0,
+      // raw totals across the team's matches
+      minutes: 0,
+      shotsTotal: 0,
+      sotTotal: 0,
+      possessionSum: 0,        // sum of match possession % (averaged later)
+      foulsTotal: 0,
+      yellowCards: 0, redCards: 0,
+      cardPoints: 0,           // Y*1 + R*2 raw total
+      offsidesTotal: 0,
+      cornersTotal: 0,
+      // per-90 derived (filled in second pass)
+      shotsP90: 0, sotP90: 0,
+      foulsP90: 0, cardsP90: 0,
+      offsidesP90: 0, cornersP90: 0,
+      avgPossession: 0,
+      eliminated: !!t.Eliminated,
+      eliminationStage: t.EliminationStage || '',
+      eliminationDate: t.EliminationDate || '',
+      finalPosition: t.FinalPosition === '' || t.FinalPosition == null ? '' : Number(t.FinalPosition),
+    });
+  }
+
+  for (const m of matches) {
+    if (!m.HomeTeam || !m.AwayTeam || !hasResult(m)) continue;
+    const home = stats.get(m.HomeTeam);
+    const away = stats.get(m.AwayTeam);
+    if (!home || !away) continue;
+
+    const hg = n(m.HomeGoals);
+    const ag = n(m.AwayGoals);
+
+    home.played++; away.played++;
+    home.goalsFor += hg; home.goalsAgainst += ag;
+    away.goalsFor += ag; away.goalsAgainst += hg;
+    home.yellowCards += n(m.HomeYellowCards);
+    away.yellowCards += n(m.AwayYellowCards);
+    home.redCards += n(m.HomeRedCards);
+    away.redCards += n(m.AwayRedCards);
+
+    // Per-90 inputs
+    const mins = n(m.Minutes) || 90;
+    home.minutes += mins; away.minutes += mins;
+    home.shotsTotal    += n(m.HomeShots);    away.shotsTotal    += n(m.AwayShots);
+    home.sotTotal      += n(m.HomeSoT);      away.sotTotal      += n(m.AwaySoT);
+    home.possessionSum += n(m.HomePossession); away.possessionSum += n(m.AwayPossession);
+    home.foulsTotal    += n(m.HomeFouls);    away.foulsTotal    += n(m.AwayFouls);
+    home.offsidesTotal += n(m.HomeOffsides); away.offsidesTotal += n(m.AwayOffsides);
+    home.cornersTotal  += n(m.HomeCorners);  away.cornersTotal  += n(m.AwayCorners);
+
+    let pHome = 0, pAway = 0;
+    const margin = Math.abs(hg - ag);
+    if (hg > ag) {
+      home.wins++; away.losses++; pHome = 3;
+      if (margin > home.biggestWinMargin) home.biggestWinMargin = margin;
+    } else if (ag > hg) {
+      away.wins++; home.losses++; pAway = 3;
+      if (margin > away.biggestWinMargin) away.biggestWinMargin = margin;
+    } else {
+      home.draws++; away.draws++; pHome = 1; pAway = 1;
+    }
+    home.points += pHome; away.points += pAway;
+    if (isGroupStage(m.Stage)) {
+      home.groupPoints += pHome;
+      away.groupPoints += pAway;
+    }
+  }
+
+  for (const s of stats.values()) {
+    s.goalDifference = s.goalsFor - s.goalsAgainst;
+    s.cardPoints = s.yellowCards * 1 + s.redCards * 2;
+    const m = s.minutes;
+    const p90 = v => m > 0 ? v / m * 90 : 0;
+    s.shotsP90    = p90(s.shotsTotal);
+    s.sotP90      = p90(s.sotTotal);
+    s.foulsP90    = p90(s.foulsTotal);
+    s.cardsP90    = p90(s.cardPoints);
+    s.offsidesP90 = p90(s.offsidesTotal);
+    s.cornersP90  = p90(s.cornersTotal);
+    s.avgPossession = s.played > 0 ? s.possessionSum / s.played : 0;
+  }
+  return stats;
+}
+
+// ============================================================
+// Prize resolvers
+// ------------------------------------------------------------
+// Each returns the *full ranked list*, so cards (top entry)
+// and the modal (entire list) both read from the same data.
+//
+// Status values:
+//   'leading'     — value matches the current leader value
+//   'contention'  — team can still catch up (active in tournament)
+//   'eliminated'  — team is out of tournament and below leader
+//   'won'         — prize is final and this team holds it
+//   'tbd'         — prize state not known yet
+// ============================================================
+
+function rankAndStatus(items, opts) {
+  // items: [{team, participant, flag, value, eliminated, ...}], sorted best-first.
+  // Returns same items annotated with rank + status.
+  if (!items.length) return items;
+  const leaderValue = items[0].value;
+  const direction = opts && opts.lower ? 'lower' : 'higher';
+  let curRank = 0, prevValue = null;
+  for (let i = 0; i < items.length; i++) {
+    const it = items[i];
+    if (i === 0 || it.value !== prevValue) curRank = i + 1;
+    it.rank = curRank;
+    prevValue = it.value;
+    if (it.value === leaderValue) {
+      it.status = 'leading';
+    } else if (it.eliminated) {
+      it.status = 'eliminated';
+    } else if (direction === 'lower' && it.value > leaderValue) {
+      // For "fewest", an active team with already-higher value still in race
+      // (their tally only grows, but the leader's might too). Keep as contention.
+      it.status = 'contention';
+    } else {
+      it.status = 'contention';
+    }
+  }
+  return items;
+}
+
+function prizeMax(field, opts) {
+  opts = opts || {};
+  return function (stats) {
+    const items = [];
+    for (const s of stats.values()) {
+      if (opts.minMatches && s.played < opts.minMatches) continue;
+      items.push({
+        team: s.team, participant: s.participant, flag: s.flag,
+        value: s[field], eliminated: s.eliminated, group: s.group,
+      });
+    }
+    items.sort((a, b) => b.value - a.value);
+    if (!items.length || (opts.minValue != null && items[0].value < opts.minValue)) {
+      return { ranked: [], leaderRank: null, note: 'No data yet' };
+    }
+    return { ranked: rankAndStatus(items), leaderRank: items[0].value };
+  };
+}
+function prizeMin(field, opts) {
+  opts = opts || {};
+  return function (stats) {
+    const items = [];
+    for (const s of stats.values()) {
+      if (opts.minMatches && s.played < opts.minMatches) continue;
+      items.push({
+        team: s.team, participant: s.participant, flag: s.flag,
+        value: s[field], eliminated: s.eliminated, group: s.group,
+      });
+    }
+    items.sort((a, b) => a.value - b.value);
+    if (!items.length) {
+      return { ranked: [], leaderRank: null, note: opts.minMatches ? 'Need ' + opts.minMatches + '+ matches' : 'No data yet' };
+    }
+    return { ranked: rankAndStatus(items, { lower: true }), leaderRank: items[0].value };
+  };
+}
+function prizeFinalPosition(pos) {
+  return function (stats, ctx) {
+    const items = [];
+    for (const t of ctx.teams) {
+      if (Number(t.FinalPosition) === pos) {
+        const s = stats.get(t.Team);
+        items.push({
+          team: t.Team,
+          participant: s ? s.participant : (t.Participant || ''),
+          flag: (s && s.flag) || flagFor(t.Team, t.FlagEmoji),
+          value: '',
+          eliminated: false,
+          group: t.Group || '',
+        });
+      }
+    }
+    if (!items.length) return { ranked: [], leaderRank: null, note: 'TBD', autoFinal: false };
+    items.forEach((it, i) => { it.rank = i + 1; it.status = 'won'; });
+    return { ranked: items, leaderRank: '', autoFinal: true };
+  };
+}
+
+// Awards-driven prizes (Golden Ball / Glove / Young Player). Until
+// the user fills in the country in the Awards sheet, the prize is
+// TBD. Once filled, the country's team becomes the confirmed
+// winner.
+function prizeAward(awardKey) {
+  return function (stats, ctx) {
+    const award = ctx.awards && ctx.awards[awardKey];
+    if (!award || !award.country) {
+      return { ranked: [], leaderRank: null, note: 'Awarded post-tournament', autoFinal: false };
+    }
+    const country = award.country;
+    const s = stats.get(country);
+    const item = {
+      team: country,
+      participant: s ? s.participant : participantFor(ctx.teams, country),
+      flag: s ? s.flag : flagFor(country),
+      value: award.player || '',
+      valueLabel: award.player ? award.player + ' (' + country + ')' : country,
+      eliminated: false,
+      group: s ? s.group : (groupFor(ctx.teams, country) || ''),
+      rank: 1,
+      status: 'won',
+    };
+    return { ranked: [item], leaderRank: award.player || country, autoFinal: true };
+  };
+}
+
+// Golden Boot — live: top scorer in Golden Boot Tracker; once the
+// Awards sheet has a confirmed entry, that wins outright.
+function prizeGoldenBoot(stats, ctx) {
+  const award = ctx.awards && ctx.awards.goldenBoot;
+  if (award && award.country) {
+    return prizeAward('goldenBoot')(stats, ctx);
+  }
+  const scorers = ctx.goldenBoot || [];
+  if (!scorers.length) {
+    return { ranked: [], leaderRank: null, note: 'No goals tracked yet', autoFinal: false };
+  }
+  const top = scorers[0].goals;
+  const items = scorers.map(sc => {
+    const s = stats.get(sc.country);
+    return {
+      team: sc.country,
+      participant: s ? s.participant : participantFor(ctx.teams, sc.country),
+      flag: s ? s.flag : flagFor(sc.country),
+      value: sc.goals,
+      valueLabel: sc.goals + ' goals — ' + sc.player,
+      eliminated: false,
+      group: s ? s.group : (groupFor(ctx.teams, sc.country) || ''),
+    };
+  });
+  items.sort((a, b) => b.value - a.value);
+  return { ranked: rankAndStatus(items), leaderRank: top, autoFinal: false };
+}
+
+function participantFor(teams, country) {
+  const t = teams.find(x => x.Team === country);
+  return t ? (t.Participant || '') : '';
+}
+function groupFor(teams, country) {
+  const t = teams.find(x => x.Team === country);
+  return t ? (t.Group || '') : '';
+}
+
+// Highest-scoring match — both teams in the match with most total
+// goals share the prize. Ties are kept (multiple matches with the
+// same total goals).
+function prizeHighScoringMatch(stats, ctx) {
+  return resolveTopMatch(stats, ctx, () => true, 'No matches played');
+}
+
+// Highest-scoring drawn match — same as above, restricted to
+// drawn results (excluding 0-0).
+function prizeHighScoringDraw(stats, ctx) {
+  return resolveTopMatch(stats, ctx,
+    m => n(m.HomeGoals) === n(m.AwayGoals) && n(m.HomeGoals) > 0,
+    'No drawn matches yet');
+}
+
+function resolveTopMatch(stats, ctx, predicate, emptyNote) {
+  let best = -1, bestMatches = [];
+  for (const m of ctx.matches) {
+    if (!hasResult(m) || !predicate(m)) continue;
+    const total = n(m.HomeGoals) + n(m.AwayGoals);
+    if (total > best) { best = total; bestMatches = [m]; }
+    else if (total === best) bestMatches.push(m);
+  }
+  if (best <= 0) return { ranked: [], leaderRank: null, note: emptyNote };
+  const seen = new Set();
+  const items = [];
+  for (const m of bestMatches) {
+    const label = m.HomeTeam + ' ' + n(m.HomeGoals) + '-' + n(m.AwayGoals) + ' ' + m.AwayTeam;
+    for (const team of [m.HomeTeam, m.AwayTeam]) {
+      if (seen.has(team)) continue;
+      seen.add(team);
+      const s = stats.get(team);
+      items.push({
+        team,
+        participant: s ? s.participant : '',
+        flag: s ? s.flag : flagFor(team),
+        value: best,
+        valueLabel: best + ' goals (' + label + ')',
+        eliminated: s ? s.eliminated : false,
+        group: s ? s.group : '',
+      });
+    }
+  }
+  items.forEach(it => { it.rank = 1; it.status = 'leading'; });
+  return {
+    ranked: items,
+    leaderRank: best,
+    contextLabel: bestMatches.map(m => m.HomeTeam + ' v ' + m.AwayTeam).join(', '),
+  };
+}
+
+// First team to score 10 goals — walks completed matches in
+// chronological order accumulating each team's goals scored. The
+// first team whose running total crosses 10 wins outright. If
+// multiple teams cross 10 in the same match, they tie. Until any
+// team has reached 10 the prize shows the running leader.
+function prizeFirstTo10(stats, ctx) {
+  const TARGET = 10;
+  const played = ctx.matches
+    .filter(hasResult)
+    .map((m, idx) => ({ m, idx }))
+    .sort((a, b) => {
+      const da = a.m.Date instanceof Date ? a.m.Date.getTime() : new Date(a.m.Date).getTime() || 0;
+      const db = b.m.Date instanceof Date ? b.m.Date.getTime() : new Date(b.m.Date).getTime() || 0;
+      if (da !== db) return da - db;
+      return a.idx - b.idx;
+    });
+
+  const running = new Map();
+  for (const t of ctx.teams) running.set(t.Team, 0);
+
+  let winnersOnCross = [];
+  for (const { m } of played) {
+    const newCrossings = [];
+    if (running.has(m.HomeTeam)) {
+      const before = running.get(m.HomeTeam);
+      const after = before + n(m.HomeGoals);
+      running.set(m.HomeTeam, after);
+      if (before < TARGET && after >= TARGET) newCrossings.push(m.HomeTeam);
+    }
+    if (running.has(m.AwayTeam)) {
+      const before = running.get(m.AwayTeam);
+      const after = before + n(m.AwayGoals);
+      running.set(m.AwayTeam, after);
+      if (before < TARGET && after >= TARGET) newCrossings.push(m.AwayTeam);
+    }
+    if (newCrossings.length) { winnersOnCross = newCrossings; break; }
+  }
+
+  if (winnersOnCross.length) {
+    const items = winnersOnCross.map(team => {
+      const s = stats.get(team);
+      return {
+        team,
+        participant: s ? s.participant : '',
+        flag: s ? s.flag : flagFor(team),
+        value: running.get(team),
+        eliminated: false,
+        group: s ? s.group : '',
+        rank: 1,
+        status: 'won',
+      };
+    });
+    return { ranked: items, leaderRank: TARGET, autoFinal: true };
+  }
+
+  // No team has crossed 10 yet — show running leader.
+  const items = [];
+  for (const [team, gf] of running.entries()) {
+    if (gf <= 0) continue;
+    const s = stats.get(team);
+    if (!s) continue;
+    items.push({
+      team,
+      participant: s.participant,
+      flag: s.flag,
+      value: gf,
+      eliminated: s.eliminated,
+      group: s.group,
+    });
+  }
+  if (!items.length) return { ranked: [], leaderRank: null, note: 'No goals yet' };
+  items.sort((a, b) => b.value - a.value);
+  return { ranked: rankAndStatus(items), leaderRank: items[0].value };
+}
+
+// ============================================================
+// Phase / finalisation
+// ============================================================
+
+function detectPhase(matches, awards) {
+  const winnerAwarded = awards && awards.winner && awards.winner.country;
+  const finalsPlayed = matches.some(m => canonicalStage(m.Stage) === 'Final' && hasResult(m));
+  if (winnerAwarded || finalsPlayed) return 'complete';
+  const knockoutPlayed = matches.some(m => !isGroupStage(m.Stage) && hasResult(m));
+  if (knockoutPlayed) return 'knockout';
+  const groups = matches.filter(m => isGroupStage(m.Stage));
+  const groupsAllPlayed = groups.length > 0 && groups.every(hasResult);
+  if (groupsAllPlayed) return 'knockout';
+  return 'group';
+}
+
+function isPrizeFinal(prizeCat, sheetRow, phase, hasFinalPos1) {
+  // Manual override always wins.
+  if (sheetRow && parseBool(sheetRow.IsFinal)) return true;
+  // Podium: final iff matching FinalPosition exists.
+  if (prizeCat.podium) return sheetRow && hasFinalPos1 ? hasFinalPos1.has(prizeCat.podium) : false;
+  // Group-stage-only prize: final once group stage complete.
+  if (prizeCat.groupStageOnly) return phase === 'knockout' || phase === 'complete';
+  // Tournament-wide prize: final when tournament complete.
+  return phase === 'complete';
+}
+
+function resolveAllPrizes(state) {
+  const ctx = {
+    teams: state.teams,
+    matches: state.matches,
+    awards: state.awards || {},
+    goldenBoot: state.goldenBoot || [],
+  };
+  const filledPositions = new Set(
+    state.teams
+      .map(t => Number(t.FinalPosition))
+      .filter(v => v === 1 || v === 2 || v === 3)
+  );
+
+  return PRIZE_CATEGORIES.map(p => {
+    const r = p.resolver(state.stats, ctx);
+    const sheetRow = state.prizes.find(x => x.PrizeCategory === p.label);
+    const isFinal = r.autoFinal || isPrizeFinal(p, sheetRow, state.phase, filledPositions);
+
+    // If final, every leading row becomes 'won'; non-leaders keep 'eliminated'.
+    if (isFinal && r.ranked) {
+      for (const it of r.ranked) {
+        if (it.status === 'leading') it.status = 'won';
+        else if (it.status === 'contention') it.status = 'eliminated';
+      }
+    }
+    return {
+      key: p.key,
+      label: p.label,
+      podium: !!p.podium,
+      unit: p.unit,
+      description: prizeDescription(p.key),
+      prizeValue: (sheetRow && sheetRow.PrizeValue) || '',
+      isFinal,
+      ranked: r.ranked || [],
+      leaderRank: r.leaderRank,
+      note: r.note || '',
+      contextLabel: r.contextLabel || '',
+    };
+  });
+}
+
+// ============================================================
+// Workbook IO
+// ============================================================
+
+// ------------------------------------------------------------
+// tracker.json parser
+// ------------------------------------------------------------
+// The dashboard reads a single JSON file (`tracker.json`) as its
+// source of truth. The shape:
+//
+//   { version: 1,
+//     teams:   [ { group, team, entrant }, ... ],
+//     matches: [ { id, date, stage, homeTeam, awayTeam,
+//                  homeScore, awayScore, minutes,
+//                  homeShots, awayShots, homeSoT, awaySoT,
+//                  homePossession, awayPossession,
+//                  homeFouls, awayFouls,
+//                  homeYellow, awayYellow, homeRed, awayRed,
+//                  homeOffsides, awayOffsides,
+//                  homeCorners, awayCorners }, ... ],
+//     awards:  { winner: { player, country },
+//                runnerup: ..., third: ..., goldenBoot: ... },
+//     goldenBoot: [ { player, country, goals }, ... ] }
+//
+// Mutability: the Awards / Golden Boot blocks accept blank
+// `country` / `goals` until the data is known. Empty match score
+// means "fixture, not played yet".
+function parseTrackerJson(doc) {
+  const docTeams   = Array.isArray(doc && doc.teams)      ? doc.teams      : [];
+  const docMatches = Array.isArray(doc && doc.matches)    ? doc.matches    : [];
+  const docAwards  = (doc && typeof doc.awards === 'object' && doc.awards) ? doc.awards : {};
+  const docGB      = Array.isArray(doc && doc.goldenBoot) ? doc.goldenBoot : [];
+
+  // Awards — copy through, ensuring all 4 keys exist.
+  const awards = {
+    winner:     readAward(docAwards.winner),
+    runnerup:   readAward(docAwards.runnerup),
+    third:      readAward(docAwards.third),
+    goldenBoot: readAward(docAwards.goldenBoot),
+  };
+
+  // Podium positions from awards drive FinalPosition on Teams.
+  const podiumByCountry = {};
+  if (awards.winner.country)   podiumByCountry[awards.winner.country]   = 1;
+  if (awards.runnerup.country) podiumByCountry[awards.runnerup.country] = 2;
+  if (awards.third.country)    podiumByCountry[awards.third.country]    = 3;
+
+  const teams = docTeams
+    .filter(t => String(t && t.team || '').trim())
+    .map(t => {
+      const team = String(t.team).trim();
+      return {
+        TeamID: team,
+        Team: team,
+        Group: String(t.group || '').trim(),
+        FIFA_Rank: 0,
+        FlagEmoji: '',
+        Participant: String(t.entrant || '').trim(),
+        Eliminated: false,
+        EliminationStage: '',
+        EliminationDate: '',
+        FinalPosition: podiumByCountry[team] || '',
+      };
+    });
+
+  const groupByTeam = Object.fromEntries(teams.map(t => [t.Team, t.Group]));
+
+  const matches = docMatches
+    .filter(m => m && String(m.homeTeam || '').trim() && String(m.awayTeam || '').trim())
+    .map((m, i) => {
+      const stage = canonicalStage(m.stage);
+      const homeTeam = String(m.homeTeam).trim();
+      const awayTeam = String(m.awayTeam).trim();
+      const group = isGroupStage(stage) ? (groupByTeam[homeTeam] || '') : '';
+      const minutes = m.minutes == null || m.minutes === '' ? 90 : Number(m.minutes) || 90;
+      return {
+        MatchID: m.id || ('M' + String(i + 1).padStart(3, '0')),
+        Date: m.date ? new Date(m.date) : '',
+        Stage: stage,
+        Group: group,
+        HomeTeam: homeTeam,
+        AwayTeam: awayTeam,
+        HomeFlagEmoji: '',
+        AwayFlagEmoji: '',
+        HomeGoals: m.homeScore == null || m.homeScore === '' ? '' : m.homeScore,
+        AwayGoals: m.awayScore == null || m.awayScore === '' ? '' : m.awayScore,
+        Minutes: minutes,
+        HomePenaltyGoals: '',
+        AwayPenaltyGoals: '',
+        HomeShots:      n(m.homeShots),
+        AwayShots:      n(m.awayShots),
+        HomeSoT:        n(m.homeSoT),
+        AwaySoT:        n(m.awaySoT),
+        HomePossession: n(m.homePossession),
+        AwayPossession: n(m.awayPossession),
+        HomeFouls:      n(m.homeFouls),
+        AwayFouls:      n(m.awayFouls),
+        HomeYellowCards: n(m.homeYellow),
+        AwayYellowCards: n(m.awayYellow),
+        HomeRedCards:    n(m.homeRed),
+        AwayRedCards:    n(m.awayRed),
+        HomeOffsides:    n(m.homeOffsides),
+        AwayOffsides:    n(m.awayOffsides),
+        HomeCorners:     n(m.homeCorners),
+        AwayCorners:     n(m.awayCorners),
+        HomePenaltiesConceded: 0,
+        AwayPenaltiesConceded: 0,
+        HomeNotableEvents: '',
+        AwayNotableEvents: '',
+        Winner: '',
+        Notes: '',
+      };
+    });
+
+  const goldenBoot = docGB
+    .filter(g => g && String(g.player || '').trim())
+    .map(g => ({
+      player: String(g.player).trim(),
+      country: String(g.country || '').trim(),
+      goals: n(g.goals),
+    }))
+    .sort((a, b) => b.goals - a.goals);
+
+  return { teams, matches, prizes: [], awards, goldenBoot };
+}
+
+function readAward(a) {
+  if (!a || typeof a !== 'object') return { player: '', country: '' };
+  return {
+    player: String(a.player || '').trim(),
+    country: String(a.country || '').trim(),
+  };
+}
+
+function buildSampleJson() {
+  const { teams, matches, awards, goldenBoot } = generateSampleData();
+  return {
+    version: 1,
+    teams: teams.map(t => ({
+      group: t.Group,
+      team: t.Team,
+      entrant: t.Participant,
+    })),
+    matches: matches.map(m => ({
+      id: m.MatchID,
+      date: m.Date instanceof Date ? fmtDate(m.Date) : (m.Date || null),
+      stage: m.Stage,
+      homeTeam: m.HomeTeam,
+      awayTeam: m.AwayTeam,
+      homeScore: m.HomeGoals === '' ? null : m.HomeGoals,
+      awayScore: m.AwayGoals === '' ? null : m.AwayGoals,
+      minutes: m.Minutes,
+      homeShots: m.HomeShots, awayShots: m.AwayShots,
+      homeSoT: m.HomeSoT, awaySoT: m.AwaySoT,
+      homePossession: m.HomePossession, awayPossession: m.AwayPossession,
+      homeFouls: m.HomeFouls, awayFouls: m.AwayFouls,
+      homeYellow: m.HomeYellowCards, awayYellow: m.AwayYellowCards,
+      homeRed: m.HomeRedCards, awayRed: m.AwayRedCards,
+      homeOffsides: m.HomeOffsides, awayOffsides: m.AwayOffsides,
+      homeCorners: m.HomeCorners, awayCorners: m.AwayCorners,
+    })),
+    awards: {
+      winner:     awards.winner     || { player: '', country: '' },
+      runnerup:   awards.runnerup   || { player: '', country: '' },
+      third:      awards.third      || { player: '', country: '' },
+      goldenBoot: awards.goldenBoot || { player: '', country: '' },
+    },
+    goldenBoot: goldenBoot.map(g => ({ player: g.player, country: g.country, goals: g.goals })),
+  };
+}
+
+function downloadSampleJson() {
+  const blob = new Blob([JSON.stringify(buildSampleJson(), null, 2)], { type: 'application/json' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = 'tracker.json';
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(a.href), 5000);
+  setStatus('Sample tracker.json downloaded. Save it next to index.html.', 'ok');
+}
+
+async function loadFromFile(file) {
+  try {
+    setStatus('Reading ' + file.name + '…');
+    const text = await file.text();
+    const doc = JSON.parse(text);
+    setData(parseTrackerJson(doc), file.name);
+  } catch (e) {
+    console.error(e);
+    setStatus('Failed to read JSON: ' + e.message, 'error');
+  }
+}
+
+async function loadFromDataFolder(silent) {
+  try {
+    if (!silent) setStatus('Loading tracker.json…');
+    const res = await fetch('tracker.json', { cache: 'no-store' });
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    const doc = await res.json();
+    setData(parseTrackerJson(doc), 'tracker.json');
+  } catch (e) {
+    console.warn('Auto-load failed:', e);
+    if (!silent) setStatus("Couldn't load tracker.json — showing sample data. Open the admin drawer to load a file manually.", 'error');
+    loadSample();
+  }
+}
+function loadSample() {
+  setData(generateSampleData(), 'sample data');
+}
+
+function setData({ teams, matches, prizes, awards, goldenBoot }, source) {
+  STATE.teams = teams;
+  STATE.matches = matches;
+  STATE.prizes = prizes || [];
+  STATE.awards = awards || {};
+  STATE.goldenBoot = goldenBoot || [];
+  STATE.stats = computeTeamStats(teams, matches);
+  STATE.phase = detectPhase(matches, STATE.awards);
+  STATE.carouselMode = STATE.phase === 'group' ? 'group' : 'knockout';
+  STATE.carouselIndex = 0;
+  STATE.prizeResults = resolveAllPrizes(STATE);
+  renderAll();
+  if (source) {
+    const playedCount = matches.filter(hasResult).length;
+    setStatus('Loaded ' + source + ' — ' + teams.length + ' teams, ' + playedCount + '/' + matches.length + ' matches played.', 'ok');
+  }
+}
+
+// ============================================================
+// Rendering
+// ============================================================
+
+function renderAll() {
+  renderHeaderMeta();
+  renderSpotlight();
+  renderTicker();
+  renderCarousel();
+  renderBracket();
+  renderPrizeCards();
+  renderLeaderboard();
+  renderParticipants();
+  startCarouselTimer();
+  if (!STATE.hasLanded) {
+    requestAnimationFrame(playLandingChoreography);
+    STATE.hasLanded = true;
+  }
+}
+
+function renderHeaderMeta() {
+  const played = STATE.matches.filter(hasResult);
+  const goals = played.reduce((s, m) => s + n(m.HomeGoals) + n(m.AwayGoals), 0);
+  $('#meta-teams').textContent = STATE.teams.length || '—';
+  $('#meta-played').textContent = played.length + ' / ' + STATE.matches.length;
+  $('#meta-goals').textContent = goals;
+  $('#meta-updated').textContent = new Date().toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' });
+
+  const phaseLabels = {
+    group: 'Group stage live',
+    knockout: 'Knockout stage live',
+    complete: 'Tournament complete',
+  };
+  $('#phase-indicator').textContent = phaseLabels[STATE.phase] || 'Live';
+
+  // Tournament progress (% of matches with results)
+  const total = STATE.matches.length;
+  const pct = total ? Math.round((played.length / total) * 100) : 0;
+  const fill = $('#hero-progress-fill');
+  if (fill) fill.style.width = pct + '%';
+  const label = $('#phase-progress-label');
+  if (label) label.textContent = total
+    ? pct + '% complete · ' + played.length + ' of ' + total + ' matches'
+    : 'Awaiting fixtures';
+}
+
+// ---------- Match ticker ----------
+
+function renderTicker() {
+  const root = $('#ticker');
+  root.innerHTML = '';
+  const items = STATE.matches
+    .filter(hasResult)
+    .slice()
+    .sort((a, b) => {
+      const da = a.Date instanceof Date ? a.Date.getTime() : new Date(a.Date).getTime() || 0;
+      const db = b.Date instanceof Date ? b.Date.getTime() : new Date(b.Date).getTime() || 0;
+      return db - da;
+    });
+
+  if (!items.length) {
+    root.innerHTML = '<div class="ticker-empty">No completed matches yet.</div>';
+    return;
+  }
+
+  for (const m of items) {
+    const stage = canonicalStage(m.Stage);
+    const stageShort = stageBadge(stage);
+    const hg = n(m.HomeGoals), ag = n(m.AwayGoals);
+    const hpen = m.HomePenaltyGoals, apen = m.AwayPenaltyGoals;
+    const winner = m.Winner || (hg > ag ? m.HomeTeam : ag > hg ? m.AwayTeam : '');
+    const tags = [];
+    if (n(m.HomeRedCards) + n(m.AwayRedCards) > 0) tags.push(['red', 'RED']);
+    if (n(m.HomePenaltiesConceded) + n(m.AwayPenaltiesConceded) > 0) tags.push(['pen', 'PEN']);
+    if (hg + ag >= 5) tags.push(['high', 'HOT']);
+
+    const homeFlag = m.HomeFlagEmoji || flagFor(m.HomeTeam);
+    const awayFlag = m.AwayFlagEmoji || flagFor(m.AwayTeam);
+    const homeMark = winner === m.HomeTeam ? 'winner-mark' : (winner && winner !== '' ? 'loser-mark' : '');
+    const awayMark = winner === m.AwayTeam ? 'winner-mark' : (winner && winner !== '' ? 'loser-mark' : '');
+    const penLine = (hpen !== '' && hpen != null && apen !== '' && apen != null)
+      ? `<span class="pen-score">(${hpen}-${apen} pens)</span>` : '';
+
+    const item = document.createElement('div');
+    item.className = 'ticker-item';
+    item.title = stage + ' • ' + fmtShortDate(m.Date);
+    item.innerHTML = `
+      <span class="stage-tag">${escapeHtml(stageShort)}</span>
+      <div class="home ${homeMark}">
+        <span class="team-name">${escapeHtml(m.HomeTeam)}</span>
+        <span class="flag">${homeFlag}</span>
+      </div>
+      <div class="score-block">
+        <div class="score">${hg}<span class="score-dash">-</span>${ag}${penLine}</div>
+        ${tags.length ? `<div class="event-tags">${tags.map(([k, l]) => `<span class="event-tag ${k}">${l}</span>`).join('')}</div>` : ''}
+      </div>
+      <div class="away ${awayMark}">
+        <span class="flag">${awayFlag}</span>
+        <span class="team-name">${escapeHtml(m.AwayTeam)}</span>
+      </div>
+    `;
+    root.appendChild(item);
+  }
+}
+
+function stageBadge(stage) {
+  const c = canonicalStage(stage);
+  const m = {
+    'Group':'GS', 'Group Stage':'GS',
+    'Round of 32':'R32', 'Round of 16':'R16',
+    'Quarter-finals':'QF', 'Semi-finals':'SF',
+    'Third Place':'3rd', 'Final':'FINAL',
+  };
+  return m[c] || c.slice(0, 3).toUpperCase();
+}
+
+// ---------- Group / knockout carousel ----------
+
+function carouselPanels() {
+  if (STATE.carouselMode === 'group') {
+    const groups = Array.from(new Set(STATE.teams.map(t => t.Group).filter(Boolean))).sort();
+    return groups.map(g => ({ kind: 'group', key: g, title: 'Group ' + g }));
+  }
+  return KNOCKOUT_STAGES.map(s => ({ kind: 'knockout', key: s.key, title: s.label, short: s.short }));
+}
+
+function renderCarousel() {
+  const track = $('#carousel-track');
+  track.innerHTML = '';
+  const panels = carouselPanels();
+
+  // Title + sub
+  $('#carousel-title').textContent = STATE.carouselMode === 'group' ? 'Group standings' : 'Knockout fixtures';
+  $('#carousel-sub').textContent = STATE.carouselMode === 'group'
+    ? 'Top 2 in each group, plus 8 best 3rd-placed, advance'
+    : 'Each knockout round in order';
+
+  if (!panels.length) {
+    track.innerHTML = '<div class="carousel-panel active"><div class="fixture-card no-fixtures">No data yet.</div></div>';
+    $('#carousel-pager').textContent = '—';
+    $('#carousel-dots').innerHTML = '';
+    return;
+  }
+  if (STATE.carouselIndex >= panels.length) STATE.carouselIndex = 0;
+
+  panels.forEach((p, idx) => {
+    const panel = document.createElement('div');
+    panel.className = 'carousel-panel' + (idx === STATE.carouselIndex ? ' active' : '');
+    panel.setAttribute('role', 'tabpanel');
+    panel.setAttribute('aria-hidden', idx === STATE.carouselIndex ? 'false' : 'true');
+
+    if (p.kind === 'group') {
+      panel.innerHTML = renderGroupPanel(p.key);
+    } else {
+      panel.innerHTML = renderKnockoutPanel(p.key, p.short);
+    }
+    track.appendChild(panel);
+  });
+
+  // Dots
+  const dots = $('#carousel-dots');
+  dots.innerHTML = '';
+  panels.forEach((p, idx) => {
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.setAttribute('role', 'tab');
+    b.setAttribute('aria-label', p.title);
+    b.setAttribute('aria-current', idx === STATE.carouselIndex ? 'true' : 'false');
+    b.addEventListener('click', () => {
+      STATE.carouselIndex = idx;
+      pauseCarousel();
+      renderCarousel();
+    });
+    dots.appendChild(b);
+  });
+
+  $('#carousel-pager').textContent = (STATE.carouselIndex + 1).toString().padStart(2, '0') + ' / ' + panels.length.toString().padStart(2, '0');
+}
+
+function renderGroupPanel(groupCode) {
+  const groupTeams = STATE.teams
+    .filter(t => t.Group === groupCode)
+    .map(t => STATE.stats.get(t.Team))
+    .filter(Boolean);
+
+  // Sort by group points, GD, GF, alphabet — the typical FIFA rule order.
+  groupTeams.sort((a, b) =>
+    (b.groupPoints - a.groupPoints) ||
+    (b.goalDifference - a.goalDifference) ||
+    (b.goalsFor - a.goalsFor) ||
+    a.team.localeCompare(b.team)
+  );
+
+  const groupMatchesPlayed = STATE.matches
+    .filter(m => isGroupStage(m.Stage) && m.Group === groupCode && hasResult(m))
+    .length;
+  const groupMatchesTotal = STATE.matches
+    .filter(m => isGroupStage(m.Stage) && m.Group === groupCode)
+    .length || 6;
+
+  const rows = groupTeams.map((s, i) => {
+    const cls = [];
+    if (i < 2) cls.push('qualifying-zone');
+    if (s.eliminated) cls.push('knocked-out');
+    return `
+      <tr class="${cls.join(' ')}">
+        <td class="pos">${i + 1}</td>
+        <td>
+          <span class="flag-with-name">
+            <span class="flag">${s.flag || flagFor(s.team)}</span>
+            <span class="team-name">${escapeHtml(s.team)}</span>
+          </span>
+        </td>
+        <td class="owner">${escapeHtml(s.participant || '—')}</td>
+        <td class="num">${s.played}</td>
+        <td class="num">${s.wins}</td>
+        <td class="num">${s.draws}</td>
+        <td class="num">${s.losses}</td>
+        <td class="num">${s.goalsFor}</td>
+        <td class="num">${s.goalsAgainst}</td>
+        <td class="num">${s.goalDifference >= 0 ? '+' : ''}${s.goalDifference}</td>
+        <td class="num pts">${s.groupPoints}</td>
+      </tr>`;
+  }).join('');
+
+  return `
+    <div class="panel-letter" aria-hidden="true">${escapeHtml(groupCode)}</div>
+    <div class="panel-head">
+      <div class="panel-title">Group ${escapeHtml(groupCode)}</div>
+      <div class="panel-meta">${groupMatchesPlayed} / ${groupMatchesTotal} played</div>
+    </div>
+    <table class="group-table">
+      <thead><tr>
+        <th></th><th>Team</th><th>Owner</th>
+        <th class="num">P</th><th class="num">W</th><th class="num">D</th><th class="num">L</th>
+        <th class="num">GF</th><th class="num">GA</th><th class="num">GD</th><th class="num">Pts</th>
+      </tr></thead>
+      <tbody>${rows}</tbody>
+    </table>
+  `;
+}
+
+function renderKnockoutPanel(stageKey, shortLabel) {
+  const fixtures = STATE.matches
+    .filter(m => canonicalStage(m.Stage) === stageKey)
+    .sort((a, b) => {
+      const da = a.Date instanceof Date ? a.Date.getTime() : new Date(a.Date).getTime() || 0;
+      const db = b.Date instanceof Date ? b.Date.getTime() : new Date(b.Date).getTime() || 0;
+      return da - db;
+    });
+
+  if (!fixtures.length) {
+    return `
+      <div class="panel-head">
+        <div class="panel-title">${escapeHtml(stageKey)}</div>
+        <div class="panel-meta">${escapeHtml(shortLabel || '')}</div>
+      </div>
+      <div class="fixtures-grid">
+        <div class="fixture-card no-fixtures">Fixtures not added yet.</div>
+      </div>`;
+  }
+
+  const cards = fixtures.map(m => {
+    const played = hasResult(m);
+    const hg = n(m.HomeGoals), ag = n(m.AwayGoals);
+    const hpen = m.HomePenaltyGoals, apen = m.AwayPenaltyGoals;
+    const explicitWinner = m.Winner;
+    const winner = explicitWinner || (played && hg !== ag ? (hg > ag ? m.HomeTeam : m.AwayTeam) : '');
+    const homeS = STATE.stats.get(m.HomeTeam);
+    const awayS = STATE.stats.get(m.AwayTeam);
+    const homeOwner = homeS ? homeS.participant : '';
+    const awayOwner = awayS ? awayS.participant : '';
+
+    function rowCls(team) {
+      if (!played) return 'tbd';
+      if (winner && winner === team) return 'winner';
+      if (winner) return 'loser';
+      return '';
+    }
+
+    const penLine = (hpen !== '' && hpen != null && apen !== '' && apen != null)
+      ? `<div class="pen-line">Pens ${hpen}-${apen}</div>` : '';
+
+    return `
+      <div class="fixture-card">
+        <div class="fixture-meta">
+          <span>${escapeHtml(fmtShortDate(m.Date))}</span>
+          <span>${escapeHtml(stageBadge(m.Stage))}</span>
+        </div>
+        <div class="row ${rowCls(m.HomeTeam)}">
+          <div class="team-side">
+            <span class="flag">${m.HomeFlagEmoji || flagFor(m.HomeTeam)}</span>
+            <div>
+              <div class="team-name">${escapeHtml(m.HomeTeam)}</div>
+              <div class="owner">${escapeHtml(homeOwner || '—')}</div>
+            </div>
+          </div>
+          <div class="goals">${played ? hg : '—'}</div>
+        </div>
+        <div class="row ${rowCls(m.AwayTeam)}">
+          <div class="team-side">
+            <span class="flag">${m.AwayFlagEmoji || flagFor(m.AwayTeam)}</span>
+            <div>
+              <div class="team-name">${escapeHtml(m.AwayTeam)}</div>
+              <div class="owner">${escapeHtml(awayOwner || '—')}</div>
+            </div>
+          </div>
+          <div class="goals">${played ? ag : '—'}</div>
+        </div>
+        ${penLine}
+      </div>`;
+  }).join('');
+
+  const playedCount = fixtures.filter(hasResult).length;
+  return `
+    <div class="panel-head">
+      <div class="panel-title">${escapeHtml(stageKey)}</div>
+      <div class="panel-meta">${playedCount}/${fixtures.length} played</div>
+    </div>
+    <div class="fixtures-grid">${cards}</div>
+  `;
+}
+
+function startCarouselTimer() {
+  stopCarouselTimer();
+  if (!STATE.carouselPlaying) return;
+  STATE.carouselTimer = setInterval(() => {
+    const panels = carouselPanels();
+    if (!panels.length) return;
+    STATE.carouselIndex = (STATE.carouselIndex + 1) % panels.length;
+    renderCarousel();
+  }, CAROUSEL_AUTO_MS);
+}
+function stopCarouselTimer() {
+  if (STATE.carouselTimer) clearInterval(STATE.carouselTimer);
+  STATE.carouselTimer = null;
+}
+function pauseCarousel() {
+  STATE.carouselPlaying = false;
+  stopCarouselTimer();
+  syncCarouselPauseBtn();
+}
+function syncCarouselPauseBtn() {
+  const btn = $('#carousel-pause');
+  const playing = STATE.carouselPlaying;
+  btn.dataset.playing = String(playing);
+  btn.setAttribute('aria-label', playing ? 'Pause auto-rotate' : 'Resume auto-rotate');
+  btn.title = playing ? 'Pause auto-rotate' : 'Resume auto-rotate';
+  $('#carousel-pause-icon').innerHTML = playing
+    ? '<path fill="currentColor" d="M6 5h4v14H6zM14 5h4v14h-4z"/>'
+    : '<path fill="currentColor" d="M8 5v14l11-7z"/>';
+}
+
+// ---------- Prize cards ----------
+
+function renderPrizeCards() {
+  const root = $('#prize-cards');
+  root.innerHTML = '';
+
+  for (const p of STATE.prizeResults) {
+    const card = document.createElement('button');
+    card.type = 'button';
+    card.className = 'prize-card' + (p.podium ? ' podium' : '') + (p.isFinal ? ' final' : '');
+    card.setAttribute('aria-label', 'Open race for ' + p.label);
+
+    const leaders = p.ranked.filter(r => r.status === 'leading' || r.status === 'won');
+    const top = leaders[0];
+    const tieCount = leaders.length - 1;
+
+    // Lead margin: numerical values only. Compares leader to next non-tied row.
+    let leadInfo = null;
+    if (top && typeof top.value === 'number' && p.ranked.length > 1) {
+      const nextNonTie = p.ranked.find(r => r.value !== top.value);
+      if (nextNonTie && typeof nextNonTie.value === 'number') {
+        const gap = Math.abs(top.value - nextNonTie.value);
+        leadInfo = { gap, runnerUpValue: nextNonTie.value };
+      }
+    }
+
+    let body;
+    if (!top) {
+      body = `<div class="empty">${escapeHtml(p.note || 'Awaiting data')}</div>`;
+    } else {
+      const valueDisplay = formatPrizeValueShort(top, p);
+      body = `
+        <div class="winner-row">
+          <div class="winner-info">
+            <span class="flag lg">${top.flag || flagFor(top.team)}</span>
+            <div class="meta-line">
+              <span class="team">${escapeHtml(top.team)}</span>
+              <span class="participant">${escapeHtml(top.participant || 'unassigned')}</span>
+            </div>
+          </div>
+          ${valueDisplay ? `<div class="stat">${escapeHtml(valueDisplay)}</div>` : ''}
+        </div>
+        ${renderLeadBar(p, leadInfo, tieCount)}`;
+    }
+
+    card.innerHTML = `
+      <div class="top-row">
+        <span class="label">${escapeHtml(p.label)}</span>
+        ${renderStatusChip(p, top)}
+      </div>
+      ${body}
+      <div class="desc">
+        <span>${escapeHtml(p.description)}</span>
+        <span class="more">${tieCount > 0 ? '+' + tieCount + ' tied · ' : ''}View race</span>
+      </div>
+    `;
+    card.addEventListener('click', () => openRaceModal(p));
+    root.appendChild(card);
+  }
+}
+
+// Lead-margin hairline under the winner row. Final = full bar
+// in gold; tied = striped half-bar; otherwise lead distance
+// scaled against the runner-up's value so a "1-goal lead in a
+// 1-goal contest" still reads as a fragile lead.
+function renderLeadBar(prize, leadInfo, tieCount) {
+  if (prize.isFinal) {
+    return `<div class="lead-bar lead-final" aria-hidden="true">
+      <span class="lead-rail"><span class="lead-fill" style="width:100%"></span></span>
+      <span class="lead-text">Confirmed</span>
+    </div>`;
+  }
+  if (tieCount > 0) {
+    return `<div class="lead-bar lead-tied" aria-hidden="true">
+      <span class="lead-rail"><span class="lead-fill" style="width:50%"></span></span>
+      <span class="lead-text">${tieCount + 1}-way tie</span>
+    </div>`;
+  }
+  if (!leadInfo || leadInfo.gap === 0) return '';
+  const max = Math.max(3, Math.abs(leadInfo.runnerUpValue) || 3);
+  const pct = Math.max(15, Math.min(100, Math.round((leadInfo.gap / max) * 100)));
+  return `<div class="lead-bar" aria-hidden="true">
+    <span class="lead-rail"><span class="lead-fill" style="width:${pct}%"></span></span>
+    <span class="lead-text">+${leadInfo.gap} clear</span>
+  </div>`;
+}
+
+function renderStatusChip(prize, leader) {
+  if (!leader) return `<span class="chip chip-tbd">TBD</span>`;
+  if (prize.isFinal) return `<span class="chip chip-won">Winner confirmed</span>`;
+  if (prize.podium && !prize.isFinal) return `<span class="chip chip-tbd">Awaiting result</span>`;
+  return `<span class="chip chip-leading">Current leader</span>`;
+}
+
+function formatPrizeValue(item, prize) {
+  // Long form for the race-modal table — includes any free-text
+  // valueLabel (e.g. score breakdown for "Highest-scoring match").
+  if (item.valueLabel) return item.valueLabel;
+  if (item.value === '' || item.value == null) return '';
+  if (prize.unit) return item.value + ' ' + prize.unit;
+  return String(item.value);
+}
+function formatPrizeValueShort(item, prize) {
+  // Tight form for the prize-card grid: no valueLabel — that
+  // text overflows the card. Always "<value> <unit>" or just
+  // value, never the long contextual variant.
+  if (item.value === '' || item.value == null) return '';
+  if (prize.unit) return item.value + ' ' + prize.unit;
+  return String(item.value);
+}
+
+// ---------- Race modal ----------
+
+function openRaceModal(prize) {
+  const modal = $('#race-modal');
+  $('#race-modal-title').textContent = prize.label;
+  $('#race-modal-eyebrow').textContent = prize.isFinal ? 'Prize confirmed' : 'Prize race — live';
+  $('#race-modal-sub').innerHTML = escapeHtml(prize.description) +
+    (prize.contextLabel ? ' &middot; <em>' + escapeHtml(prize.contextLabel) + '</em>' : '');
+
+  const body = $('#race-modal-body');
+  if (!prize.ranked.length) {
+    body.innerHTML = `<p style="text-align:center;color:var(--text-4);font-style:italic;padding:32px 0;">${escapeHtml(prize.note || 'No data yet.')}</p>`;
+  } else {
+    const leaderValue = prize.ranked[0].value;
+    // Compute denominator for the value bar. Numeric values only.
+    const numericValues = prize.ranked
+      .map(r => Number(r.value))
+      .filter(v => !isNaN(v) && isFinite(v));
+    const maxNumeric = numericValues.length ? Math.max(...numericValues) : 0;
+    const minNumeric = numericValues.length ? Math.min(...numericValues) : 0;
+    const isMin = (leaderValue === minNumeric && leaderValue !== maxNumeric);
+    const showBar = numericValues.length > 1 && maxNumeric !== minNumeric;
+
+    const rows = prize.ranked.map(r => {
+      const tied = r.value === leaderValue && (r.status === 'leading' || r.status === 'won');
+      const cls = [];
+      if (r.eliminated) cls.push('eliminated');
+      if (tied) cls.push('tied-with-leader');
+      const valueText = formatPrizeValue(r, prize);
+      const tooltipData = JSON.stringify({
+        title: r.team,
+        owner: r.participant || 'unassigned',
+        value: valueText || prize.label,
+        group: r.group || '',
+      });
+      // Value bar: scale 0–100% relative to leader (or inverse for "min" prizes).
+      let barPct = 0;
+      const numv = Number(r.value);
+      if (showBar && !isNaN(numv) && isFinite(numv)) {
+        if (isMin) {
+          // For min-style prizes, smaller = better -> bigger bar.
+          barPct = maxNumeric === minNumeric ? 100
+            : Math.round(((maxNumeric - numv) / (maxNumeric - minNumeric)) * 100);
+        } else {
+          barPct = maxNumeric === 0 ? 0 : Math.round((numv / maxNumeric) * 100);
+        }
+        barPct = Math.max(0, Math.min(100, barPct));
+      }
+      const valueCell = showBar
+        ? `<td class="value-cell"><span class="value-bar"><span class="value-bar-fill" style="width:${barPct}%"></span></span>${escapeHtml(valueText || '')}</td>`
+        : `<td class="num value">${escapeHtml(valueText || '')}</td>`;
+      return `
+        <tr class="${cls.join(' ')}">
+          <td class="rank">${r.rank}</td>
+          <td>
+            <div class="team-cell" data-tooltip='${escapeHtml(tooltipData)}'>
+              <span class="flag">${r.flag || flagFor(r.team)}</span>
+              <span class="team-name">${escapeHtml(r.team)}</span>
+            </div>
+          </td>
+          <td class="owner">${escapeHtml(r.participant || '—')}</td>
+          ${valueCell}
+          <td>${chipFor(r.status)}</td>
+        </tr>`;
+    }).join('');
+    body.innerHTML = `
+      <table class="race-table">
+        <thead><tr>
+          <th>#</th><th>Team</th><th>Owner</th><th class="num">${showBar ? 'Race' : 'Value'}</th><th>Status</th>
+        </tr></thead>
+        <tbody>${rows}</tbody>
+      </table>
+    `;
+
+    // Wire tooltips for team cells
+    body.querySelectorAll('[data-tooltip]').forEach(el => {
+      el.addEventListener('mouseenter', showTooltipFor);
+      el.addEventListener('mouseleave', hideTooltip);
+      el.addEventListener('focus', showTooltipFor);
+      el.addEventListener('blur', hideTooltip);
+    });
+  }
+
+  modal.hidden = false;
+  document.body.style.overflow = 'hidden';
+  stopCarouselTimer();
+  // Focus trap entry point
+  modal.querySelector('.icon-btn').focus();
+}
+
+function chipFor(status) {
+  const map = {
+    leading:    '<span class="chip chip-leading">Leading</span>',
+    contention: '<span class="chip chip-contention">In contention</span>',
+    eliminated: '<span class="chip chip-eliminated">Eliminated</span>',
+    won:        '<span class="chip chip-won">Won</span>',
+    tbd:        '<span class="chip chip-tbd">TBD</span>',
+  };
+  return map[status] || map.tbd;
+}
+
+function closeRaceModal() {
+  $('#race-modal').hidden = true;
+  document.body.style.overflow = '';
+  hideTooltip();
+  if (STATE.carouselPlaying) startCarouselTimer();
+}
+
+// ---------- Tooltip ----------
+
+function showTooltipFor(e) {
+  const el = e.currentTarget;
+  const raw = el.getAttribute('data-tooltip');
+  if (!raw) return;
+  let data;
+  try { data = JSON.parse(raw); } catch { return; }
+  const tip = $('#tooltip');
+  tip.innerHTML = `
+    <div class="tt-title">${escapeHtml(data.title)}</div>
+    ${data.group ? `<div class="tt-line">Group ${escapeHtml(data.group)}</div>` : ''}
+    <div class="tt-line">Owner: <span class="tt-value">${escapeHtml(data.owner)}</span></div>
+    ${data.value ? `<div class="tt-line">${escapeHtml(data.value)}</div>` : ''}
+  `;
+  tip.hidden = false;
+  positionTooltip(e);
+  el.addEventListener('mousemove', positionTooltip);
+  el._ttCleanup = () => el.removeEventListener('mousemove', positionTooltip);
+}
+function hideTooltip(e) {
+  const tip = $('#tooltip');
+  tip.hidden = true;
+  const el = e && e.currentTarget;
+  if (el && el._ttCleanup) { el._ttCleanup(); el._ttCleanup = null; }
+}
+function positionTooltip(e) {
+  const tip = $('#tooltip');
+  const pad = 10;
+  const x = (e.clientX || 0) + 12;
+  const y = (e.clientY || 0) + 16;
+  tip.style.left = Math.min(window.innerWidth - tip.offsetWidth - pad, x) + 'px';
+  tip.style.top  = Math.min(window.innerHeight - tip.offsetHeight - pad, y) + 'px';
+}
+
+// ---------- Leaderboard ----------
+
+const LEADERBOARD_COLS = [
+  { key: 'group',          label: 'Grp' },
+  { key: 'team',           label: 'Team' },
+  { key: 'participant',    label: 'Owner' },
+  { key: 'played',         label: 'P',     num: true },
+  { key: 'wins',           label: 'W',     num: true },
+  { key: 'draws',          label: 'D',     num: true },
+  { key: 'losses',         label: 'L',     num: true },
+  { key: 'goalsFor',       label: 'GF',    num: true },
+  { key: 'goalsAgainst',   label: 'GA',    num: true },
+  { key: 'goalDifference', label: 'GD',    num: true },
+  { key: 'points',         label: 'Pts',   num: true },
+  { key: 'avgPossession',  label: 'Poss%', num: true, decimals: 1 },
+  { key: 'shotsP90',       label: 'Sh/90', num: true, decimals: 2 },
+  { key: 'sotP90',         label: 'SoT/90', num: true, decimals: 2 },
+  { key: 'foulsP90',       label: 'Fls/90', num: true, decimals: 2 },
+  { key: 'cardsP90',       label: 'Cd/90',  num: true, decimals: 2 },
+  { key: 'offsidesP90',    label: 'Off/90', num: true, decimals: 2 },
+  { key: 'cornersP90',     label: 'Cnr/90', num: true, decimals: 2 },
+];
+
+function renderLeaderboard() {
+  const tbl = $('#leaderboard');
+  tbl.innerHTML = '';
+  const filter = STATE.filter.trim().toLowerCase();
+  const rows = Array.from(STATE.stats.values()).filter(s => {
+    if (!filter) return true;
+    return s.team.toLowerCase().includes(filter)
+        || (s.participant || '').toLowerCase().includes(filter)
+        || (s.group || '').toLowerCase().includes(filter);
+  });
+  rows.sort((a, b) => compareForSort(a, b, STATE.sortKey, STATE.sortDir));
+
+  const thead = document.createElement('thead');
+  const trh = document.createElement('tr');
+  for (const col of LEADERBOARD_COLS) {
+    const th = document.createElement('th');
+    th.textContent = col.label;
+    if (col.num) th.classList.add('num');
+    if (STATE.sortKey === col.key) th.classList.add(STATE.sortDir === 'asc' ? 'sorted-asc' : 'sorted-desc');
+    th.addEventListener('click', () => {
+      if (STATE.sortKey === col.key) STATE.sortDir = STATE.sortDir === 'asc' ? 'desc' : 'asc';
+      else { STATE.sortKey = col.key; STATE.sortDir = col.num ? 'desc' : 'asc'; }
+      renderLeaderboard();
+    });
+    trh.appendChild(th);
+  }
+  thead.appendChild(trh);
+  tbl.appendChild(thead);
+
+  const tbody = document.createElement('tbody');
+  // Mark top 3 with podium markers when sorting by points descending
+  // — purely visual reinforcement of the current sort.
+  const showPodium = STATE.sortKey === 'points' && STATE.sortDir === 'desc' && !STATE.filter.trim();
+  rows.forEach((s, i) => {
+    const tr = document.createElement('tr');
+    if (s.eliminated) tr.classList.add('eliminated');
+    if (showPodium && i < 3 && s.points > 0) tr.classList.add('podium-' + (i + 1));
+    for (const col of LEADERBOARD_COLS) {
+      const td = document.createElement('td');
+      if (col.num) td.classList.add('num');
+      if (col.key === 'team') {
+        td.classList.add('team-cell');
+        td.innerHTML = `<span class="flag">${s.flag || flagFor(s.team)}</span> ${escapeHtml(s.team)}`;
+      } else if (col.key === 'group') {
+        td.innerHTML = `<span class="group-pill">${escapeHtml(s.group)}</span>`;
+      } else if (col.key === 'participant') {
+        td.textContent = s.participant || '—';
+      } else if (col.key === 'goalDifference') {
+        td.textContent = (s.goalDifference >= 0 ? '+' : '') + s.goalDifference;
+      } else if (col.decimals != null) {
+        const v = Number(s[col.key]);
+        td.textContent = isFinite(v) ? v.toFixed(col.decimals) : '—';
+      } else {
+        td.textContent = s[col.key];
+      }
+      tr.appendChild(td);
+    }
+    tbody.appendChild(tr);
+  });
+  tbl.appendChild(tbody);
+}
+function compareForSort(a, b, key, dir) {
+  const av = a[key], bv = b[key];
+  let cmp;
+  if (typeof av === 'number' && typeof bv === 'number') cmp = av - bv;
+  else cmp = String(av).localeCompare(String(bv));
+  return dir === 'asc' ? cmp : -cmp;
+}
+
+// ---------- Owners scoreboard ----------
+
+function buildOwnersStandings() {
+  // Prizes won (final) and prizes still in race (live) per participant.
+  // "In race" must dedupe by prize: an owner with two teams both
+  // contending for "Most goals" only has ONE prize in race, not two.
+  const prizesByParticipant = new Map();        // name -> count of confirmed wins
+  const contendingPrizesBy = new Map();         // name -> Set<prizeKey> still live
+  for (const p of STATE.prizeResults) {
+    for (const r of p.ranked) {
+      if (!r.participant) continue;
+      if (p.isFinal && r.status === 'won') {
+        prizesByParticipant.set(r.participant, (prizesByParticipant.get(r.participant) || 0) + 1);
+      } else if (!p.isFinal && (r.status === 'leading' || r.status === 'contention')) {
+        if (!contendingPrizesBy.has(r.participant)) contendingPrizesBy.set(r.participant, new Set());
+        contendingPrizesBy.get(r.participant).add(p.key);
+      }
+    }
+  }
+
+  const byParticipant = new Map();
+  for (const t of STATE.teams) {
+    const key = t.Participant || '(unassigned)';
+    if (!byParticipant.has(key)) byParticipant.set(key, []);
+    byParticipant.get(key).push(t);
+  }
+
+  return Array.from(byParticipant.entries()).map(([name, teams]) => {
+    let alive = 0;
+    teams.forEach(t => { if (!t.Eliminated) alive++; });
+    return {
+      name,
+      teams,
+      alive,
+      prizesWon: prizesByParticipant.get(name) || 0,
+      prizesInRace: (contendingPrizesBy.get(name) || new Set()).size,
+    };
+  });
+}
+
+function sortOwners(rows, key) {
+  // Default + tiebreaks land on what the user actually cares
+  // about for an office sweepstake: confirmed prizes first,
+  // then live prize races, then teams still alive, then name.
+  const cmp = {
+    prizes:  (a, b) => (b.prizesWon - a.prizesWon) || (b.prizesInRace - a.prizesInRace) || (b.alive - a.alive) || a.name.localeCompare(b.name),
+    inrace:  (a, b) => (b.prizesInRace - a.prizesInRace) || (b.prizesWon - a.prizesWon) || (b.alive - a.alive) || a.name.localeCompare(b.name),
+    alive:   (a, b) => (b.alive - a.alive) || (b.prizesWon - a.prizesWon) || (b.prizesInRace - a.prizesInRace) || a.name.localeCompare(b.name),
+    name:    (a, b) => a.name.localeCompare(b.name),
+  }[key] || ((a, b) => a.name.localeCompare(b.name));
+  return rows.slice().sort(cmp);
+}
+
+function renderParticipants() {
+  const root = $('#participants');
+  root.innerHTML = '';
+
+  const all = buildOwnersStandings();
+  const sortKey = STATE.ownersSort || 'prizes';
+  const ranked = sortOwners(all, sortKey);
+
+  // Sync sort buttons.
+  document.querySelectorAll('[data-owners-sort]').forEach(btn => {
+    const isActive = btn.dataset.ownersSort === sortKey;
+    btn.classList.toggle('is-active', isActive);
+    btn.setAttribute('aria-selected', String(isActive));
+  });
+
+  ranked.forEach((row, idx) => {
+    const card = document.createElement('div');
+    card.className = 'participant-card';
+    // Gold accent on the leader by prizes-won, but only if they
+    // actually have any won prizes — otherwise everyone's tied
+    // at zero and it'd be arbitrary.
+    if (sortKey === 'prizes' && row.prizesWon > 0 && idx === 0) card.classList.add('podium-1');
+    if (row.alive === 0 && row.teams.length > 0) card.classList.add('all-out');
+
+    const teamsHtml = row.teams.map(t => {
+      const s = STATE.stats.get(t.Team);
+      const elim = t.Eliminated ? ' eliminated' : '';
+      const stage = t.Eliminated ? (canonicalStage(t.EliminationStage) || 'Out') : 'In';
+      return `<div class="team-row${elim}">
+        <span class="flag-with-name">
+          <span class="flag">${(s && s.flag) || flagFor(t.Team)}</span>
+          <span class="name">${escapeHtml(t.Team)}</span>
+        </span>
+        <span class="team-pts">${escapeHtml(stage)}</span>
+      </div>`;
+    }).join('');
+
+    // Big number reflects the only thing that actually matters:
+    // confirmed prizes won. Falls back to the live in-race count
+    // when nothing's been won yet — gives an owner with 5 races
+    // open visible weight versus an owner with none.
+    let bigNum, bigLabel, bigClass;
+    if (row.prizesWon > 0) {
+      bigNum = String(row.prizesWon).padStart(2, '0');
+      bigLabel = row.prizesWon === 1 ? 'prize won' : 'prizes won';
+      bigClass = 'gold';
+    } else if (row.prizesInRace > 0) {
+      bigNum = String(row.prizesInRace).padStart(2, '0');
+      bigLabel = 'in race';
+      bigClass = '';
+    } else {
+      bigNum = '—';
+      bigLabel = row.alive === 0 ? 'no race' : 'awaiting';
+      bigClass = 'muted';
+    }
+
+    const rankNum = String(idx + 1).padStart(2, '0');
+    const rankClass = idx === 0 && row.prizesWon > 0 && sortKey === 'prizes' ? 'rank-medal medal-1'
+                   : idx === 0 ? 'rank-num leading'
+                   : 'rank-num';
+
+    card.innerHTML = `
+      <div class="owner-head">
+        <span class="${rankClass}">${rankNum}</span>
+        <div class="owner-id">
+          <div class="name">${escapeHtml(row.name)}</div>
+          <div class="owner-meta">
+            ${row.alive}/${row.teams.length} alive
+          </div>
+        </div>
+        <div class="owner-score ${bigClass}">
+          <div class="score-num">${bigNum}</div>
+          <div class="score-label">${escapeHtml(bigLabel)}</div>
+        </div>
+      </div>
+      <div class="owner-pills">
+        ${row.prizesWon > 0 ? `<span class="owner-pill won">★ ${row.prizesWon} won</span>` : ''}
+        ${row.prizesInRace > 0 ? `<span class="owner-pill race">${row.prizesInRace} in race</span>` : ''}
+        ${row.alive === 0 && row.teams.length > 0 ? `<span class="owner-pill out">All out</span>` : ''}
+      </div>
+      <div class="teams">${teamsHtml}</div>
+    `;
+    root.appendChild(card);
+  });
+}
+
+// ============================================================
+// Spotlight (now / next match)
+// ------------------------------------------------------------
+// Picks the most relevant match for the moment:
+//   - LIVE     : a fixture whose Date is today and result not yet
+//                entered (heuristic — the real "live" signal is
+//                that you've not yet typed in goals).
+//   - NEXT     : earliest unplayed fixture in the future.
+//   - JUST IN  : if no upcoming fixture, surface the latest result
+//                instead so the strip still feels alive.
+// ============================================================
+
+function pickSpotlight() {
+  const now = new Date();
+  const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  const tomorrow = new Date(today.getTime() + 86400000);
+
+  const upcoming = STATE.matches
+    .filter(m => !hasResult(m) && m.HomeTeam && m.AwayTeam)
+    .map(m => {
+      const d = m.Date instanceof Date ? m.Date : (m.Date ? new Date(m.Date) : null);
+      return { match: m, date: d && !isNaN(d) ? d : null };
+    })
+    .sort((a, b) => {
+      if (!a.date && !b.date) return 0;
+      if (!a.date) return 1;
+      if (!b.date) return -1;
+      return a.date - b.date;
+    });
+
+  // LIVE: an unplayed fixture dated today.
+  const live = upcoming.find(u => u.date && u.date >= today && u.date < tomorrow);
+  if (live) return { kind: 'live', match: live.match, date: live.date };
+
+  // NEXT: the next chronological unplayed fixture in the future.
+  const next = upcoming.find(u => u.date && u.date >= today);
+  if (next) return { kind: 'next', match: next.match, date: next.date };
+
+  // No upcoming with a date — surface most recent result instead.
+  const recent = STATE.matches
+    .filter(hasResult)
+    .map(m => ({ m, d: m.Date instanceof Date ? m.Date : new Date(m.Date) }))
+    .filter(x => x.d && !isNaN(x.d))
+    .sort((a, b) => b.d - a.d)[0];
+  if (recent) return { kind: 'recent', match: recent.m, date: recent.d };
+
+  return null;
+}
+
+function formatCountdown(ms) {
+  if (ms <= 0) return 'Kick-off imminent';
+  const h = Math.floor(ms / 3600000);
+  const m = Math.floor((ms % 3600000) / 60000);
+  if (h >= 24) {
+    const days = Math.floor(h / 24);
+    const rem = h % 24;
+    return days + 'd ' + rem + 'h to go';
+  }
+  if (h > 0) return h + 'h ' + m + 'm to go';
+  return m + 'm to go';
+}
+
+function spotlightStatusLine(spot) {
+  const dt = spot.date;
+  if (spot.kind === 'live') {
+    if (!dt) return { tag: 'TODAY', label: 'Match scheduled today' };
+    return { tag: 'TODAY', label: 'Kick-off ' + dt.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' }) };
+  }
+  if (spot.kind === 'next') {
+    const ms = dt - new Date();
+    return { tag: 'NEXT UP', label: formatCountdown(ms) + ' · ' + dt.toLocaleDateString(undefined, { weekday: 'short', month: 'short', day: 'numeric' }) };
+  }
+  if (spot.kind === 'recent') {
+    return { tag: 'JUST IN', label: 'Most recent result · ' + (dt ? fmtShortDate(dt) : '') };
+  }
+  return { tag: '', label: '' };
+}
+
+function renderSpotlight() {
+  const root = $('#spotlight');
+  const section = $('#spotlight-section');
+  if (!root || !section) return;
+  if (STATE.spotlightTimer) { clearInterval(STATE.spotlightTimer); STATE.spotlightTimer = null; }
+
+  const spot = pickSpotlight();
+  if (!spot) { section.hidden = true; return; }
+  section.hidden = false;
+
+  const m = spot.match;
+  const homeS = STATE.stats.get(m.HomeTeam);
+  const awayS = STATE.stats.get(m.AwayTeam);
+  const homeOwner = (homeS && homeS.participant) || '';
+  const awayOwner = (awayS && awayS.participant) || '';
+  const homeFlag  = m.HomeFlagEmoji || flagFor(m.HomeTeam);
+  const awayFlag  = m.AwayFlagEmoji || flagFor(m.AwayTeam);
+  const stage     = canonicalStage(m.Stage);
+  const status    = spotlightStatusLine(spot);
+
+  const hg = n(m.HomeGoals), ag = n(m.AwayGoals);
+  const hpen = m.HomePenaltyGoals, apen = m.AwayPenaltyGoals;
+  const winner = m.Winner || (hasResult(m) && hg !== ag ? (hg > ag ? m.HomeTeam : m.AwayTeam) : '');
+  const isPlayed = hasResult(m);
+  const scoreBlock = isPlayed
+    ? `<div class="spotlight-score">
+         <span class="${winner === m.HomeTeam ? 'win' : winner ? 'lose' : ''}">${hg}</span>
+         <span class="dash">–</span>
+         <span class="${winner === m.AwayTeam ? 'win' : winner ? 'lose' : ''}">${ag}</span>
+         ${hpen !== '' && hpen != null && apen !== '' && apen != null
+           ? `<div class="spotlight-pens">(${hpen}-${apen} pens)</div>` : ''}
+       </div>`
+    : `<div class="spotlight-vs">vs</div>`;
+
+  const tagClass = spot.kind === 'live' ? 'spotlight-tag live'
+                : spot.kind === 'next' ? 'spotlight-tag next'
+                : 'spotlight-tag recent';
+
+  root.className = 'spotlight kind-' + spot.kind;
+  root.innerHTML = `
+    <div class="spotlight-rail">
+      <div class="${tagClass}">
+        ${spot.kind === 'live' ? '<span class="spot-pulse" aria-hidden="true"></span>' : ''}
+        <span class="spotlight-tag-text">${escapeHtml(status.tag)}</span>
+      </div>
+      <div class="spotlight-stage">${escapeHtml(stage)}</div>
+      <div class="spotlight-status" id="spotlight-countdown">${escapeHtml(status.label)}</div>
+    </div>
+    <div class="spotlight-body">
+      <div class="spotlight-team home ${winner === m.HomeTeam ? 'is-winner' : ''}">
+        <div class="spot-flag">${homeFlag}</div>
+        <div class="spot-text">
+          <div class="spot-team">${escapeHtml(m.HomeTeam)}</div>
+          <div class="spot-owner">${escapeHtml(homeOwner || 'unassigned')}</div>
+        </div>
+      </div>
+      ${scoreBlock}
+      <div class="spotlight-team away ${winner === m.AwayTeam ? 'is-winner' : ''}">
+        <div class="spot-text right">
+          <div class="spot-team">${escapeHtml(m.AwayTeam)}</div>
+          <div class="spot-owner">${escapeHtml(awayOwner || 'unassigned')}</div>
+        </div>
+        <div class="spot-flag">${awayFlag}</div>
+      </div>
+    </div>
+  `;
+
+  // Live countdown ticker for the "next" kind.
+  if (spot.kind === 'next' && spot.date) {
+    STATE.spotlightTimer = setInterval(() => {
+      const el = document.getElementById('spotlight-countdown');
+      if (!el) { clearInterval(STATE.spotlightTimer); return; }
+      const ms = spot.date - new Date();
+      if (ms <= 0) { renderSpotlight(); return; }
+      const dt = spot.date;
+      el.textContent = formatCountdown(ms) + ' · ' + dt.toLocaleDateString(undefined, { weekday: 'short', month: 'short', day: 'numeric' });
+    }, 30000);
+  }
+}
+
+// ============================================================
+// Knockout bracket
+// ------------------------------------------------------------
+// Renders R32 → R16 → QF → SF → Final as five vertical columns
+// with a separate small card for the 3rd-place play-off. Each
+// match card shows both teams + owner, with winner highlight.
+// Spacing is even per-column so successive rounds visually align
+// to the midpoints of the prior round (classic ESPN-style flow).
+// ============================================================
+
+const BRACKET_ROUNDS = ['Round of 32', 'Round of 16', 'Quarter-finals', 'Semi-finals', 'Final'];
+
+function renderBracket() {
+  const section = $('#bracket-section');
+  const root = $('#bracket');
+  if (!section || !root) return;
+
+  // Show whenever the workbook has any knockout fixtures (real or
+  // placeholder). Hidden only if the workbook has none — in which
+  // case we'd render a sea of TBD cards with nothing useful.
+  const haveAny = STATE.matches.some(m => !isGroupStage(m.Stage));
+  if (!haveAny) { section.hidden = true; return; }
+  section.hidden = false;
+
+  const roundsHtml = BRACKET_ROUNDS.map(stage => {
+    const fixtures = STATE.matches
+      .filter(m => canonicalStage(m.Stage) === stage)
+      .sort((a, b) => {
+        const da = a.Date instanceof Date ? a.Date.getTime() : new Date(a.Date).getTime() || 0;
+        const db = b.Date instanceof Date ? b.Date.getTime() : new Date(b.Date).getTime() || 0;
+        return da - db;
+      });
+    const expectedCount = stage === 'Round of 32' ? 16
+                       : stage === 'Round of 16' ? 8
+                       : stage === 'Quarter-finals' ? 4
+                       : stage === 'Semi-finals' ? 2
+                       : 1;
+    const fixturesWithTeams = fixtures.filter(f => f.HomeTeam && f.AwayTeam);
+    let cards;
+    if (fixturesWithTeams.length) {
+      // Some real fixtures: render those, padded with placeholders only if we
+      // know about additional empty rows in the workbook for this round.
+      cards = (fixtures.length === expectedCount ? fixtures : fixturesWithTeams)
+        .map(m => bracketMatchCard(m, stage)).join('');
+    } else {
+      // No teams set yet for this round: collapse to a single
+      // "N matches TBD" placeholder rather than N empty cards.
+      cards = `<div class="bracket-match tbd bracket-empty"><div class="bracket-team"><span class="bracket-name muted">${expectedCount} match${expectedCount === 1 ? '' : 'es'} TBD</span></div></div>`;
+    }
+    return `
+      <div class="bracket-round" data-stage="${escapeHtml(stage)}">
+        <div class="bracket-round-head">
+          <span class="bracket-round-name">${escapeHtml(stage)}</span>
+          <span class="bracket-round-meta">${fixtures.filter(hasResult).length}/${expectedCount}</span>
+        </div>
+        <div class="bracket-round-body">${cards}</div>
+      </div>`;
+  }).join('');
+
+  // 3rd place play-off, shown as an aside.
+  const third = STATE.matches.find(m => canonicalStage(m.Stage) === 'Third Place');
+  const thirdHtml = third ? `
+    <div class="bracket-aside">
+      <div class="bracket-round-head">
+        <span class="bracket-round-name">3rd Place</span>
+        <span class="bracket-round-meta">${hasResult(third) ? '1/1' : '0/1'}</span>
+      </div>
+      ${bracketMatchCard(third, 'Third Place')}
+    </div>` : '';
+
+  root.innerHTML = `<div class="bracket">${roundsHtml}</div>${thirdHtml}`;
+}
+
+function bracketMatchCard(m, stage) {
+  if (!m || !m.HomeTeam || !m.AwayTeam) {
+    return `
+      <div class="bracket-match tbd">
+        <div class="bracket-team"><span class="bracket-flag muted">·</span><span class="bracket-name muted">TBD</span><span></span><span class="bracket-goals muted">·</span></div>
+        <div class="bracket-team"><span class="bracket-flag muted">·</span><span class="bracket-name muted">TBD</span><span></span><span class="bracket-goals muted">·</span></div>
+      </div>`;
+  }
+  const played = hasResult(m);
+  const hg = n(m.HomeGoals), ag = n(m.AwayGoals);
+  const hpen = m.HomePenaltyGoals, apen = m.AwayPenaltyGoals;
+  const onPens = hpen !== '' && hpen != null && apen !== '' && apen != null;
+  const winner = m.Winner || (played && hg !== ag ? (hg > ag ? m.HomeTeam : m.AwayTeam) : '');
+  const homeS = STATE.stats.get(m.HomeTeam);
+  const awayS = STATE.stats.get(m.AwayTeam);
+  const homeOwner = (homeS && homeS.participant) || '';
+  const awayOwner = (awayS && awayS.participant) || '';
+
+  const teamRow = (team, flag, owner, goals, isWinner, isLoser) => `
+    <div class="bracket-team ${isWinner ? 'is-winner' : ''} ${isLoser ? 'is-loser' : ''}">
+      <span class="bracket-flag">${flag}</span>
+      <span class="bracket-name">${escapeHtml(team)}</span>
+      <span class="bracket-owner">${escapeHtml(owner || '—')}</span>
+      <span class="bracket-goals">${played ? goals : '·'}</span>
+    </div>`;
+
+  const homeFlag = m.HomeFlagEmoji || flagFor(m.HomeTeam);
+  const awayFlag = m.AwayFlagEmoji || flagFor(m.AwayTeam);
+  const homeIsWinner = winner === m.HomeTeam;
+  const awayIsWinner = winner === m.AwayTeam;
+  const homeIsLoser = !!winner && !homeIsWinner;
+  const awayIsLoser = !!winner && !awayIsWinner;
+
+  return `
+    <div class="bracket-match ${played ? 'played' : 'pending'} ${onPens ? 'on-pens' : ''}" title="${escapeHtml(stage + ' · ' + fmtShortDate(m.Date))}">
+      ${teamRow(m.HomeTeam, homeFlag, homeOwner, hg, homeIsWinner, homeIsLoser)}
+      ${teamRow(m.AwayTeam, awayFlag, awayOwner, ag, awayIsWinner, awayIsLoser)}
+      ${onPens ? `<div class="bracket-pens">${hpen}-${apen} on pens</div>` : ''}
+    </div>`;
+}
+
+// ============================================================
+// Landing motion choreography
+// ------------------------------------------------------------
+// Runs once on first data load. Tweens each numeric counter in
+// the hero from 0 -> final value, then triggers the cascading
+// .land-in animations on prize cards / ticker / spotlight via
+// CSS classes. Respects prefers-reduced-motion.
+// ============================================================
+
+function playLandingChoreography() {
+  const reduce = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  if (reduce) return;
+
+  // Number tween only on the masthead — quiet, considered.
+  const counters = [
+    { el: $('#meta-teams'),  end: STATE.teams.length },
+    { el: $('#meta-played'), end: STATE.matches.filter(hasResult).length, total: STATE.matches.length },
+    { el: $('#meta-goals'),  end: STATE.matches.filter(hasResult).reduce((s, m) => s + n(m.HomeGoals) + n(m.AwayGoals), 0) },
+  ];
+  counters.forEach((c, i) => tweenNumber(c.el, c.end, 600, i * 60, c.total));
+}
+
+function tweenNumber(el, endValue, durationMs, delayMs, totalForFraction) {
+  if (!el) return;
+  const finalText = totalForFraction != null ? (endValue + ' / ' + totalForFraction) : String(endValue);
+  el.textContent = totalForFraction != null ? '0 / ' + totalForFraction : '0';
+  const start = performance.now() + delayMs;
+  function frame(now) {
+    if (now < start) { requestAnimationFrame(frame); return; }
+    const t = Math.min(1, (now - start) / durationMs);
+    const eased = 1 - Math.pow(1 - t, 3);
+    const value = Math.round(endValue * eased);
+    el.textContent = totalForFraction != null ? value + ' / ' + totalForFraction : String(value);
+    if (t < 1) requestAnimationFrame(frame);
+    else el.textContent = finalText;
+  }
+  requestAnimationFrame(frame);
+}
+
+// ============================================================
+// Init
+// ============================================================
+
+function trapFocus(modalEl) {
+  const focusable = modalEl.querySelectorAll(
+    'button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])'
+  );
+  if (!focusable.length) return;
+  const first = focusable[0], last = focusable[focusable.length - 1];
+  modalEl.addEventListener('keydown', (e) => {
+    if (e.key !== 'Tab') return;
+    if (e.shiftKey && document.activeElement === first) { last.focus(); e.preventDefault(); }
+    else if (!e.shiftKey && document.activeElement === last) { first.focus(); e.preventDefault(); }
+  });
+}
+
+function init() {
+  // Admin drawer toggle
+  $('#admin-toggle').addEventListener('click', () => {
+    $('#admin-drawer').hidden = false;
+  });
+  document.querySelectorAll('[data-drawer-close]').forEach(el => {
+    el.addEventListener('click', () => { $('#admin-drawer').hidden = true; });
+  });
+
+  // Drawer actions
+  $('#file-input').addEventListener('change', e => {
+    const file = e.target.files && e.target.files[0];
+    if (file) { loadFromFile(file); $('#admin-drawer').hidden = true; }
+  });
+  $('#sample-btn').addEventListener('click', () => { loadSample(); $('#admin-drawer').hidden = true; });
+  $('#download-btn').addEventListener('click', downloadSampleJson);
+  $('#reload-btn').addEventListener('click', () => { loadFromDataFolder(); $('#admin-drawer').hidden = true; });
+
+  // Drag & drop anywhere
+  document.addEventListener('dragover', e => e.preventDefault());
+  document.addEventListener('drop', e => {
+    e.preventDefault();
+    const file = e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files[0];
+    if (file) loadFromFile(file);
+  });
+
+  // Carousel controls
+  $('#carousel-prev').addEventListener('click', () => {
+    const panels = carouselPanels();
+    if (!panels.length) return;
+    STATE.carouselIndex = (STATE.carouselIndex - 1 + panels.length) % panels.length;
+    pauseCarousel();
+    renderCarousel();
+  });
+  $('#carousel-next').addEventListener('click', () => {
+    const panels = carouselPanels();
+    if (!panels.length) return;
+    STATE.carouselIndex = (STATE.carouselIndex + 1) % panels.length;
+    pauseCarousel();
+    renderCarousel();
+  });
+  $('#carousel-pause').addEventListener('click', () => {
+    STATE.carouselPlaying = !STATE.carouselPlaying;
+    if (STATE.carouselPlaying) startCarouselTimer();
+    else stopCarouselTimer();
+    syncCarouselPauseBtn();
+  });
+
+  // Pause auto-rotate on hover/focus
+  const carousel = $('#carousel');
+  carousel.addEventListener('mouseenter', stopCarouselTimer);
+  carousel.addEventListener('mouseleave', () => { if (STATE.carouselPlaying) startCarouselTimer(); });
+  carousel.addEventListener('focusin', stopCarouselTimer);
+  carousel.addEventListener('focusout', () => { if (STATE.carouselPlaying) startCarouselTimer(); });
+
+  // Carousel keyboard: ← / →
+  carousel.addEventListener('keydown', e => {
+    if (e.key === 'ArrowLeft')  { $('#carousel-prev').click(); }
+    if (e.key === 'ArrowRight') { $('#carousel-next').click(); }
+  });
+
+  // Modal close
+  document.querySelectorAll('[data-modal-close]').forEach(el => {
+    el.addEventListener('click', closeRaceModal);
+  });
+  document.addEventListener('keydown', e => {
+    if (e.key === 'Escape') {
+      if (!$('#race-modal').hidden) closeRaceModal();
+      else if (!$('#admin-drawer').hidden) $('#admin-drawer').hidden = true;
+    }
+    // Admin drawer is hidden in the masthead; reach it via "?" key
+    // (or URL hash #admin) so sweepstake admins can still open it.
+    if (e.key === '?' && $('#race-modal').hidden && document.activeElement.tagName !== 'INPUT') {
+      $('#admin-drawer').hidden = false;
+    }
+  });
+  if (location.hash === '#admin') $('#admin-drawer').hidden = false;
+  trapFocus($('#race-modal'));
+  trapFocus($('#admin-drawer'));
+
+  // Leaderboard search
+  $('#leaderboard-search').addEventListener('input', e => {
+    STATE.filter = e.target.value;
+    renderLeaderboard();
+  });
+
+  // Owners scoreboard sort tabs
+  document.querySelectorAll('[data-owners-sort]').forEach(btn => {
+    btn.addEventListener('click', () => {
+      STATE.ownersSort = btn.dataset.ownersSort;
+      renderParticipants();
+    });
+  });
+
+  // First load
+  if (location.protocol === 'http:' || location.protocol === 'https:') {
+    loadFromDataFolder();
+  } else {
+    setStatus("Showing sample data (browsers block reading tracker.json over file://). Run a local server, or use the admin drawer to load a file.", 'ok');
+    loadSample();
+  }
+}
+
+init();

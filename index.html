@@ -1,0 +1,245 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>WC 2026 Sweepstake &mdash; Control Room</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600;700&display=swap" />
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+
+  <!-- ============================================================
+       Masthead
+       ============================================================ -->
+  <header class="hero" role="banner">
+    <div class="hero-inner">
+      <div class="hero-brand">
+        <div class="hero-mark" aria-hidden="true">26</div>
+        <div class="hero-text">
+          <div class="hero-eyebrow">FIFA World Cup 2026</div>
+          <h1 class="hero-title">Office Sweepstake</h1>
+          <div class="hero-status">
+            <span class="live-dot" aria-hidden="true"></span>
+            <span id="phase-indicator">Loading&hellip;</span>
+            <span class="hero-status-sep">/</span>
+            <span id="phase-progress-label">&mdash;</span>
+          </div>
+        </div>
+      </div>
+
+      <div class="hero-actions">
+        <button id="admin-toggle" class="hidden-admin" type="button" aria-label="Admin controls" title="Admin / data tools" tabindex="-1" hidden>Admin</button>
+      </div>
+    </div>
+
+    <!-- Tournament progress bar -->
+    <div class="hero-progress" aria-hidden="true">
+      <div class="hero-progress-bar">
+        <span class="hero-progress-fill" id="hero-progress-fill" style="width: 0%"></span>
+      </div>
+    </div>
+
+    <!-- Live counters -->
+    <div class="hero-stats">
+      <div class="stat-cell">
+        <div class="stat-label">Teams</div>
+        <div class="stat-value" id="meta-teams">&mdash;</div>
+      </div>
+      <div class="stat-cell">
+        <div class="stat-label">Matches</div>
+        <div class="stat-value" id="meta-played">&mdash;</div>
+      </div>
+      <div class="stat-cell">
+        <div class="stat-label">Goals</div>
+        <div class="stat-value" id="meta-goals">&mdash;</div>
+      </div>
+      <div class="stat-cell">
+        <div class="stat-label">Updated</div>
+        <div class="stat-value" id="meta-updated">&mdash;</div>
+      </div>
+    </div>
+  </header>
+
+  <!-- Status banner (dim, secondary) -->
+  <div id="status" class="status" role="status" aria-live="polite"></div>
+
+  <!-- ============================================================
+       Match ticker (Bloomberg-style strip of completed matches)
+       ============================================================ -->
+  <section class="ticker-section" aria-label="Recent matches">
+    <div class="ticker-rail">
+      <div class="ticker-label">
+        <span class="ticker-pulse" aria-hidden="true"></span>
+        <span>Results</span>
+      </div>
+      <div id="ticker" class="ticker" tabindex="0" aria-label="Most recent completed matches, scroll to see more"></div>
+    </div>
+  </section>
+
+  <!-- ============================================================
+       Main content
+       ============================================================ -->
+  <main>
+
+    <!-- Now / Next match spotlight -->
+    <section id="spotlight-section" class="section spotlight-section" aria-label="Next match" hidden>
+      <div id="spotlight" class="spotlight"></div>
+    </section>
+
+    <!-- Group / knockout carousel -->
+    <section class="section carousel-section" aria-label="Group standings and knockout fixtures">
+      <div class="section-head">
+        <div>
+          <h2 id="carousel-title">Group standings</h2>
+          <p class="section-sub" id="carousel-sub">Auto-rotating &middot; hover to pause</p>
+        </div>
+        <div class="carousel-controls" role="tablist" aria-label="Carousel navigation">
+          <button id="carousel-prev" class="icon-btn ghost" type="button" aria-label="Previous">
+            <svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true"><path fill="currentColor" d="M15.41 7.41 14 6l-6 6 6 6 1.41-1.41L10.83 12z"/></svg>
+          </button>
+          <span id="carousel-pager" class="carousel-pager" aria-live="polite">&mdash;</span>
+          <button id="carousel-next" class="icon-btn ghost" type="button" aria-label="Next">
+            <svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true"><path fill="currentColor" d="M8.59 16.59 10 18l6-6-6-6-1.41 1.41L13.17 12z"/></svg>
+          </button>
+          <button id="carousel-pause" class="icon-btn ghost" type="button" aria-label="Pause auto-rotate" data-playing="true" title="Pause auto-rotate">
+            <svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true" id="carousel-pause-icon"><path fill="currentColor" d="M6 5h4v14H6zM14 5h4v14h-4z"/></svg>
+          </button>
+        </div>
+      </div>
+      <div id="carousel" class="carousel" tabindex="0" aria-roledescription="carousel">
+        <div class="carousel-viewport">
+          <div id="carousel-track" class="carousel-track"></div>
+        </div>
+        <div id="carousel-dots" class="carousel-dots" role="tablist"></div>
+      </div>
+    </section>
+
+    <!-- Knockout bracket (visible during knockout/complete phases) -->
+    <section id="bracket-section" class="section bracket-section" aria-label="Knockout bracket" hidden>
+      <div class="section-head">
+        <div>
+          <h2>Bracket</h2>
+          <p class="section-sub">Round of 32 through the final</p>
+        </div>
+        <div class="bracket-legend" aria-hidden="true">
+          <span><span class="legend-dot legend-winner"></span>Winner</span>
+          <span><span class="legend-dot legend-tbd"></span>TBD</span>
+          <span><span class="legend-dot legend-pen"></span>On pens</span>
+        </div>
+      </div>
+      <div id="bracket" class="bracket-wrap" tabindex="0" aria-label="Knockout bracket diagram"></div>
+    </section>
+
+    <!-- Prizes -->
+    <section class="section" aria-label="Prize standings">
+      <div class="section-head">
+        <div>
+          <h2>Prizes</h2>
+          <p class="section-sub">Tap a tile for the full race</p>
+        </div>
+      </div>
+      <div id="prize-cards" class="card-grid"></div>
+    </section>
+
+    <!-- All teams -->
+    <section class="section" aria-label="All teams">
+      <div class="section-head">
+        <div>
+          <h2>All teams</h2>
+          <p class="section-sub">Click any column to sort</p>
+        </div>
+        <div class="leaderboard-filter">
+          <input id="leaderboard-search" type="search" placeholder="Filter team or owner" aria-label="Filter teams" />
+        </div>
+      </div>
+      <div class="table-wrap">
+        <table id="leaderboard" class="data-table"></table>
+      </div>
+    </section>
+
+    <!-- Owners -->
+    <section class="section" aria-label="Owners">
+      <div class="section-head">
+        <div>
+          <h2>Owners</h2>
+          <p class="section-sub">Ranked by prizes won, then prizes still in race</p>
+        </div>
+        <div class="owners-controls" role="tablist" aria-label="Sort owners by">
+          <button class="owners-sort-btn is-active" type="button" data-owners-sort="prizes" role="tab" aria-selected="true">Prizes</button>
+          <button class="owners-sort-btn" type="button" data-owners-sort="inrace" role="tab" aria-selected="false">In race</button>
+          <button class="owners-sort-btn" type="button" data-owners-sort="alive" role="tab" aria-selected="false">Alive</button>
+          <button class="owners-sort-btn" type="button" data-owners-sort="name" role="tab" aria-selected="false">A&ndash;Z</button>
+        </div>
+      </div>
+      <div id="participants" class="participants-grid"></div>
+    </section>
+
+  </main>
+
+  <footer>
+    <div class="footer-line">&pound;20 buy-ins to charity. Prize pot funded separately.</div>
+    <div class="muted">Source: <code>tracker.json</code></div>
+  </footer>
+
+  <!-- ============================================================
+       Prize race modal (hidden until a prize card is clicked)
+       ============================================================ -->
+  <div id="race-modal" class="modal-root" role="dialog" aria-modal="true" aria-labelledby="race-modal-title" hidden>
+    <div class="modal-backdrop" data-modal-close></div>
+    <div class="modal-card" role="document">
+      <header class="modal-head">
+        <div>
+          <div class="modal-eyebrow" id="race-modal-eyebrow">Prize race</div>
+          <h2 id="race-modal-title">&mdash;</h2>
+          <p class="modal-sub" id="race-modal-sub"></p>
+        </div>
+        <button class="icon-btn ghost" type="button" aria-label="Close" data-modal-close>
+          <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path fill="currentColor" d="M19 6.4 17.6 5 12 10.6 6.4 5 5 6.4 10.6 12 5 17.6 6.4 19 12 13.4 17.6 19 19 17.6 13.4 12z"/></svg>
+        </button>
+      </header>
+      <div class="modal-body" id="race-modal-body"></div>
+    </div>
+  </div>
+
+  <!-- ============================================================
+       Admin drawer (hidden by default; toggled by topbar gear)
+       ============================================================ -->
+  <aside id="admin-drawer" class="drawer" aria-label="Admin tools" hidden>
+    <div class="drawer-backdrop" data-drawer-close></div>
+    <div class="drawer-panel">
+      <header class="drawer-head">
+        <h3>Data tools</h3>
+        <button class="icon-btn ghost" type="button" aria-label="Close" data-drawer-close>
+          <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path fill="currentColor" d="M19 6.4 17.6 5 12 10.6 6.4 5 5 6.4 10.6 12 5 17.6 6.4 19 12 13.4 17.6 19 19 17.6 13.4 12z"/></svg>
+        </button>
+      </header>
+      <div class="drawer-body">
+        <p class="drawer-help">
+          The dashboard reads <code>tracker.json</code> automatically when served from a local web server.
+          The tools below are for setup and ad-hoc loads.
+        </p>
+        <div class="drawer-actions">
+          <button id="reload-btn" class="btn" type="button">Reload tracker.json</button>
+          <label class="btn primary" for="file-input">
+            Load JSON file
+            <input id="file-input" type="file" accept=".json,application/json" hidden />
+          </label>
+          <button id="download-btn" class="btn" type="button">Download sample JSON</button>
+          <button id="sample-btn" class="btn ghost" type="button">Reset to sample data</button>
+        </div>
+        <div class="drawer-tip">
+          <strong>Tip.</strong> To enable auto-load, run <code>python -m http.server 8000</code> in the project folder and open <code>http://localhost:8000/</code>.
+        </div>
+      </div>
+    </div>
+  </aside>
+
+  <!-- Tooltip element used by flag chips & race rows -->
+  <div id="tooltip" class="tooltip" role="tooltip" hidden></div>
+
+  <script src="app.js"></script>
+</body>
+</html>
