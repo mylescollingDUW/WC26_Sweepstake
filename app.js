@@ -98,21 +98,17 @@ const FLAG_LOOKUP = COUNTRY_CODE;
 
 // Prize categories — declarative. Adding a new one is one entry.
 // Each resolver returns: { ranked: [...], leaderRank: <value>, isFinal?: bool, note?: string }
+// The 10 money prizes from the launch email — and nothing else.
+// Order mirrors the email. £ values live in the Google Sheet tracker.
 const PRIZE_CATEGORIES = [
   { key: 'winner',         label: '1st Place',                podium: 1, resolver: prizeFinalPosition(1), unit: '' },
   { key: 'runnerup',       label: '2nd Place',                podium: 2, resolver: prizeFinalPosition(2), unit: '' },
   { key: 'third',          label: '3rd Place',                podium: 3, resolver: prizeFinalPosition(3), unit: '' },
   { key: 'goldenBoot',     label: 'Golden Boot',                         resolver: prizeGoldenBoot,                              unit: 'goals' },
-  { key: 'biggestWin',     label: 'Largest goal difference',             resolver: prizeMax('biggestWinMargin',  { minValue: 1 }), unit: 'margin' },
   { key: 'biggestLoss',    label: 'Largest negative goal difference',    resolver: prizeMin('goalDifference', { minMatches: 1 }),  unit: 'GD' },
-  { key: 'highScoringMatch', label: 'Highest scoring match',             resolver: prizeHighScoringMatch,                        unit: 'goals' },
-  { key: 'highScoringDraw',  label: 'Most goals in a drawn match',       resolver: prizeHighScoringDraw,                         unit: 'goals' },
-  { key: 'firstTo10',      label: 'First team to score 10 goals',        resolver: prizeFirstTo10,                               unit: 'goals' },
   { key: 'shotsP90',       label: 'Most shots / 90',                     resolver: prizeMax('shotsP90',    { minMatches: 1 }),    unit: '', decimals: 2 },
-  { key: 'sotP90',         label: 'Most shots on target / 90',           resolver: prizeMax('sotP90',      { minMatches: 1 }),    unit: '', decimals: 2 },
   { key: 'avgPoss',        label: 'Highest avg possession',              resolver: prizeMax('avgPossession', { minMatches: 1 }),  unit: '%', decimals: 1 },
   { key: 'foulsP90',       label: 'Most fouls / 90',                     resolver: prizeMax('foulsP90',    { minMatches: 1 }),    unit: '', decimals: 2 },
-  { key: 'cardsP90',       label: 'Most cards / 90',                     resolver: prizeMax('cardsP90',    { minMatches: 1 }),    unit: '', decimals: 2 },
   { key: 'offsidesP90',    label: 'Most offsides / 90',                  resolver: prizeMax('offsidesP90', { minMatches: 1 }),    unit: '', decimals: 2 },
   { key: 'cornersP90',     label: 'Most corners / 90',                   resolver: prizeMax('cornersP90',  { minMatches: 1 }),    unit: '', decimals: 2 },
 ];
@@ -394,16 +390,10 @@ function prizeDescription(key) {
     runnerup:         'Runner-up',
     third:            'Third place',
     goldenBoot:       "Team of the tournament's top scorer",
-    biggestWin:       'Largest single-match winning margin',
     biggestLoss:      'Most negative aggregate goal difference',
-    highScoringMatch: 'Both teams in the highest-scoring match',
-    highScoringDraw:  'Both teams in the highest-scoring draw',
-    firstTo10:        'First team to reach 10 cumulative goals scored',
     shotsP90:         'Most shots per 90 minutes played',
-    sotP90:           'Most shots on target per 90 minutes played',
     avgPoss:          'Highest average possession across the tournament',
     foulsP90:         'Most fouls committed per 90 minutes played',
-    cardsP90:         'Most card points per 90 (yellow = 1, red = 2)',
     offsidesP90:      'Most offsides per 90 minutes played',
     cornersP90:       'Most corners per 90 minutes played',
   })[key] || '';
@@ -669,132 +659,6 @@ function participantFor(teams, country) {
 function groupFor(teams, country) {
   const t = teams.find(x => x.Team === country);
   return t ? (t.Group || '') : '';
-}
-
-// Highest-scoring match — both teams in the match with most total
-// goals share the prize. Ties are kept (multiple matches with the
-// same total goals).
-function prizeHighScoringMatch(stats, ctx) {
-  return resolveTopMatch(stats, ctx, () => true, 'No matches played');
-}
-
-// Highest-scoring drawn match — same as above, restricted to
-// drawn results (excluding 0-0).
-function prizeHighScoringDraw(stats, ctx) {
-  return resolveTopMatch(stats, ctx,
-    m => n(m.HomeGoals) === n(m.AwayGoals) && n(m.HomeGoals) > 0,
-    'No drawn matches yet');
-}
-
-function resolveTopMatch(stats, ctx, predicate, emptyNote) {
-  let best = -1, bestMatches = [];
-  for (const m of ctx.matches) {
-    if (!hasResult(m) || !predicate(m)) continue;
-    const total = n(m.HomeGoals) + n(m.AwayGoals);
-    if (total > best) { best = total; bestMatches = [m]; }
-    else if (total === best) bestMatches.push(m);
-  }
-  if (best <= 0) return { ranked: [], leaderRank: null, note: emptyNote };
-  const seen = new Set();
-  const items = [];
-  for (const m of bestMatches) {
-    const label = m.HomeTeam + ' ' + n(m.HomeGoals) + '-' + n(m.AwayGoals) + ' ' + m.AwayTeam;
-    for (const team of [m.HomeTeam, m.AwayTeam]) {
-      if (seen.has(team)) continue;
-      seen.add(team);
-      const s = stats.get(team);
-      items.push({
-        team,
-        participant: s ? s.participant : '',
-        flag: s ? s.flag : flagFor(team),
-        value: best,
-        valueLabel: best + ' goals (' + label + ')',
-        eliminated: s ? s.eliminated : false,
-        group: s ? s.group : '',
-      });
-    }
-  }
-  items.forEach(it => { it.rank = 1; it.status = 'leading'; });
-  return {
-    ranked: items,
-    leaderRank: best,
-    contextLabel: bestMatches.map(m => m.HomeTeam + ' v ' + m.AwayTeam).join(', '),
-  };
-}
-
-// First team to score 10 goals — walks completed matches in
-// chronological order accumulating each team's goals scored. The
-// first team whose running total crosses 10 wins outright. If
-// multiple teams cross 10 in the same match, they tie. Until any
-// team has reached 10 the prize shows the running leader.
-function prizeFirstTo10(stats, ctx) {
-  const TARGET = 10;
-  const played = ctx.matches
-    .filter(hasResult)
-    .map((m, idx) => ({ m, idx }))
-    .sort((a, b) => {
-      const da = a.m.Date instanceof Date ? a.m.Date.getTime() : new Date(a.m.Date).getTime() || 0;
-      const db = b.m.Date instanceof Date ? b.m.Date.getTime() : new Date(b.m.Date).getTime() || 0;
-      if (da !== db) return da - db;
-      return a.idx - b.idx;
-    });
-
-  const running = new Map();
-  for (const t of ctx.teams) running.set(t.Team, 0);
-
-  let winnersOnCross = [];
-  for (const { m } of played) {
-    const newCrossings = [];
-    if (running.has(m.HomeTeam)) {
-      const before = running.get(m.HomeTeam);
-      const after = before + n(m.HomeGoals);
-      running.set(m.HomeTeam, after);
-      if (before < TARGET && after >= TARGET) newCrossings.push(m.HomeTeam);
-    }
-    if (running.has(m.AwayTeam)) {
-      const before = running.get(m.AwayTeam);
-      const after = before + n(m.AwayGoals);
-      running.set(m.AwayTeam, after);
-      if (before < TARGET && after >= TARGET) newCrossings.push(m.AwayTeam);
-    }
-    if (newCrossings.length) { winnersOnCross = newCrossings; break; }
-  }
-
-  if (winnersOnCross.length) {
-    const items = winnersOnCross.map(team => {
-      const s = stats.get(team);
-      return {
-        team,
-        participant: s ? s.participant : '',
-        flag: s ? s.flag : flagFor(team),
-        value: running.get(team),
-        eliminated: false,
-        group: s ? s.group : '',
-        rank: 1,
-        status: 'won',
-      };
-    });
-    return { ranked: items, leaderRank: TARGET, autoFinal: true };
-  }
-
-  // No team has crossed 10 yet — show running leader.
-  const items = [];
-  for (const [team, gf] of running.entries()) {
-    if (gf <= 0) continue;
-    const s = stats.get(team);
-    if (!s) continue;
-    items.push({
-      team,
-      participant: s.participant,
-      flag: s.flag,
-      value: gf,
-      eliminated: s.eliminated,
-      group: s.group,
-    });
-  }
-  if (!items.length) return { ranked: [], leaderRank: null, note: 'No goals yet' };
-  items.sort((a, b) => b.value - a.value);
-  return { ranked: rankAndStatus(items), leaderRank: items[0].value };
 }
 
 // ============================================================
@@ -1728,9 +1592,7 @@ const LEADERBOARD_COLS = [
   { key: 'points',         label: 'Pts',   num: true },
   { key: 'avgPossession',  label: 'Poss%', num: true, decimals: 1 },
   { key: 'shotsP90',       label: 'Sh/90', num: true, decimals: 2 },
-  { key: 'sotP90',         label: 'SoT/90', num: true, decimals: 2 },
   { key: 'foulsP90',       label: 'Fls/90', num: true, decimals: 2 },
-  { key: 'cardsP90',       label: 'Cd/90',  num: true, decimals: 2 },
   { key: 'offsidesP90',    label: 'Off/90', num: true, decimals: 2 },
   { key: 'cornersP90',     label: 'Cnr/90', num: true, decimals: 2 },
 ];
