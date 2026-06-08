@@ -517,6 +517,18 @@ main {
   gap: var(--s-7);
   padding: var(--s-7) var(--s-7);
 }
+/* Stacked slate: hairline between each match, tighter rows. */
+.spotlight.multi .spotlight-body { padding: var(--s-5) var(--s-7); }
+.spotlight.multi .spotlight-body + .spotlight-body { border-top: 1px solid var(--rule-3); }
+.spot-time {
+  font-family: var(--font-mono);
+  font-size: var(--fs-lg);
+  font-weight: 500;
+  letter-spacing: 0.5px;
+  color: var(--ink-3);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
 .spotlight-team {
   display: flex;
   align-items: center;

@@ -1809,34 +1809,40 @@ function pickSpotlight() {
   const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
   const tomorrow = new Date(today.getTime() + 86400000);
 
-  const upcoming = STATE.matches
-    .filter(m => !hasResult(m) && m.HomeTeam && m.AwayTeam)
-    .map(m => {
-      const d = m.Date instanceof Date ? m.Date : (m.Date ? new Date(m.Date) : null);
-      return { match: m, date: d && !isNaN(d) ? d : null };
-    })
-    .sort((a, b) => {
-      if (!a.date && !b.date) return 0;
-      if (!a.date) return 1;
-      if (!b.date) return -1;
-      return a.date - b.date;
-    });
+  const dateOf = m => {
+    const d = m.Date instanceof Date ? m.Date : (m.Date ? new Date(m.Date) : null);
+    return d && !isNaN(d) ? d : null;
+  };
 
-  // LIVE: an unplayed fixture dated today.
-  const live = upcoming.find(u => u.date && u.date >= today && u.date < tomorrow);
-  if (live) return { kind: 'live', match: live.match, date: live.date };
+  const withDates = STATE.matches
+    .filter(m => m.HomeTeam && m.AwayTeam)
+    .map(m => ({ match: m, date: dateOf(m) }));
+
+  // TODAY: the full slate for today — played and upcoming alike, in
+  // kick-off order — so a busy match day shows every game, not one.
+  const todays = withDates
+    .filter(u => u.date && u.date >= today && u.date < tomorrow)
+    .sort((a, b) => a.date - b.date);
+  if (todays.length) {
+    return {
+      kind: 'live',
+      matches: todays.map(u => u.match),
+      date: todays[0].date,
+      anyUpcoming: todays.some(u => !hasResult(u.match)),
+    };
+  }
 
   // NEXT: the next chronological unplayed fixture in the future.
-  const next = upcoming.find(u => u.date && u.date >= today);
-  if (next) return { kind: 'next', match: next.match, date: next.date };
+  const next = withDates
+    .filter(u => !hasResult(u.match) && u.date && u.date >= today)
+    .sort((a, b) => a.date - b.date)[0];
+  if (next) return { kind: 'next', matches: [next.match], date: next.date };
 
   // No upcoming with a date — surface most recent result instead.
-  const recent = STATE.matches
-    .filter(hasResult)
-    .map(m => ({ m, d: m.Date instanceof Date ? m.Date : new Date(m.Date) }))
-    .filter(x => x.d && !isNaN(x.d))
-    .sort((a, b) => b.d - a.d)[0];
-  if (recent) return { kind: 'recent', match: recent.m, date: recent.d };
+  const recent = withDates
+    .filter(u => hasResult(u.match) && u.date)
+    .sort((a, b) => b.date - a.date)[0];
+  if (recent) return { kind: 'recent', matches: [recent.match], date: recent.date };
 
   return null;
 }
@@ -1854,11 +1860,18 @@ function formatCountdown(ms) {
   return m + 'm to go';
 }
 
+function fmtKickoff(dt) {
+  return dt.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' });
+}
+
 function spotlightStatusLine(spot) {
   const dt = spot.date;
   if (spot.kind === 'live') {
+    const count = spot.matches.length;
+    if (count > 1) return { tag: 'TODAY', label: count + ' matches today' };
     if (!dt) return { tag: 'TODAY', label: 'Match scheduled today' };
-    return { tag: 'TODAY', label: 'Kick-off ' + dt.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' }) };
+    if (hasResult(spot.matches[0])) return { tag: 'TODAY', label: 'Result' };
+    return { tag: 'TODAY', label: 'Kick-off ' + fmtKickoff(dt) };
   }
   if (spot.kind === 'next') {
     const ms = dt - new Date();
@@ -1868,6 +1881,56 @@ function spotlightStatusLine(spot) {
     return { tag: 'JUST IN', label: 'Most recent result · ' + (dt ? fmtShortDate(dt) : '') };
   }
   return { tag: '', label: '' };
+}
+
+function spotlightMatchBody(m, spot) {
+  const homeS = STATE.stats.get(m.HomeTeam);
+  const awayS = STATE.stats.get(m.AwayTeam);
+  const homeOwner = (homeS && homeS.participant) || '';
+  const awayOwner = (awayS && awayS.participant) || '';
+  const homeFlag  = m.HomeFlagEmoji || flagFor(m.HomeTeam);
+  const awayFlag  = m.AwayFlagEmoji || flagFor(m.AwayTeam);
+
+  const hg = n(m.HomeGoals), ag = n(m.AwayGoals);
+  const hpen = m.HomePenaltyGoals, apen = m.AwayPenaltyGoals;
+  const winner = m.Winner || (hasResult(m) && hg !== ag ? (hg > ag ? m.HomeTeam : m.AwayTeam) : '');
+
+  let centre;
+  if (hasResult(m)) {
+    centre = `<div class="spotlight-score">
+         <span class="${winner === m.HomeTeam ? 'win' : winner ? 'lose' : ''}">${hg}</span>
+         <span class="dash">–</span>
+         <span class="${winner === m.AwayTeam ? 'win' : winner ? 'lose' : ''}">${ag}</span>
+         ${hpen !== '' && hpen != null && apen !== '' && apen != null
+           ? `<div class="spotlight-pens">(${hpen}-${apen} pens)</div>` : ''}
+       </div>`;
+  } else {
+    // Today's upcoming games show their kick-off time where the score
+    // will go; the lone "next" preview keeps the simple "vs".
+    const dt = m.Date instanceof Date ? m.Date : (m.Date ? new Date(m.Date) : null);
+    centre = spot.kind === 'live' && dt && !isNaN(dt)
+      ? `<div class="spot-time">${escapeHtml(fmtKickoff(dt))}</div>`
+      : `<div class="spotlight-vs">vs</div>`;
+  }
+
+  return `
+    <div class="spotlight-body">
+      <div class="spotlight-team home ${winner === m.HomeTeam ? 'is-winner' : ''}">
+        <div class="spot-flag">${homeFlag}</div>
+        <div class="spot-text">
+          <div class="spot-team">${escapeHtml(m.HomeTeam)}</div>
+          <div class="spot-owner">${escapeHtml(homeOwner || 'unassigned')}</div>
+        </div>
+      </div>
+      ${centre}
+      <div class="spotlight-team away ${winner === m.AwayTeam ? 'is-winner' : ''}">
+        <div class="spot-text right">
+          <div class="spot-team">${escapeHtml(m.AwayTeam)}</div>
+          <div class="spot-owner">${escapeHtml(awayOwner || 'unassigned')}</div>
+        </div>
+        <div class="spot-flag">${awayFlag}</div>
+      </div>
+    </div>`;
 }
 
 function renderSpotlight() {
@@ -1880,61 +1943,31 @@ function renderSpotlight() {
   if (!spot) { section.hidden = true; return; }
   section.hidden = false;
 
-  const m = spot.match;
-  const homeS = STATE.stats.get(m.HomeTeam);
-  const awayS = STATE.stats.get(m.AwayTeam);
-  const homeOwner = (homeS && homeS.participant) || '';
-  const awayOwner = (awayS && awayS.participant) || '';
-  const homeFlag  = m.HomeFlagEmoji || flagFor(m.HomeTeam);
-  const awayFlag  = m.AwayFlagEmoji || flagFor(m.AwayTeam);
-  const stage     = canonicalStage(m.Stage);
-  const status    = spotlightStatusLine(spot);
-
-  const hg = n(m.HomeGoals), ag = n(m.AwayGoals);
-  const hpen = m.HomePenaltyGoals, apen = m.AwayPenaltyGoals;
-  const winner = m.Winner || (hasResult(m) && hg !== ag ? (hg > ag ? m.HomeTeam : m.AwayTeam) : '');
-  const isPlayed = hasResult(m);
-  const scoreBlock = isPlayed
-    ? `<div class="spotlight-score">
-         <span class="${winner === m.HomeTeam ? 'win' : winner ? 'lose' : ''}">${hg}</span>
-         <span class="dash">–</span>
-         <span class="${winner === m.AwayTeam ? 'win' : winner ? 'lose' : ''}">${ag}</span>
-         ${hpen !== '' && hpen != null && apen !== '' && apen != null
-           ? `<div class="spotlight-pens">(${hpen}-${apen} pens)</div>` : ''}
-       </div>`
-    : `<div class="spotlight-vs">vs</div>`;
+  const status = spotlightStatusLine(spot);
+  // Use the stage label only when the whole slate shares one stage —
+  // a mixed day (rare) gets no stage tag rather than a misleading one.
+  const stages = [...new Set(spot.matches.map(m => canonicalStage(m.Stage)))];
+  const stage = stages.length === 1 ? stages[0] : '';
 
   const tagClass = spot.kind === 'live' ? 'spotlight-tag live'
                 : spot.kind === 'next' ? 'spotlight-tag next'
                 : 'spotlight-tag recent';
+  // Pulse only when something's actually still to come.
+  const showPulse = spot.kind === 'live' && spot.anyUpcoming;
 
-  root.className = 'spotlight kind-' + spot.kind;
+  const bodies = spot.matches.map(m => spotlightMatchBody(m, spot)).join('');
+
+  root.className = 'spotlight kind-' + spot.kind + (spot.matches.length > 1 ? ' multi' : '');
   root.innerHTML = `
     <div class="spotlight-rail">
       <div class="${tagClass}">
-        ${spot.kind === 'live' ? '<span class="spot-pulse" aria-hidden="true"></span>' : ''}
+        ${showPulse ? '<span class="spot-pulse" aria-hidden="true"></span>' : ''}
         <span class="spotlight-tag-text">${escapeHtml(status.tag)}</span>
       </div>
       <div class="spotlight-stage">${escapeHtml(stage)}</div>
       <div class="spotlight-status" id="spotlight-countdown">${escapeHtml(status.label)}</div>
     </div>
-    <div class="spotlight-body">
-      <div class="spotlight-team home ${winner === m.HomeTeam ? 'is-winner' : ''}">
-        <div class="spot-flag">${homeFlag}</div>
-        <div class="spot-text">
-          <div class="spot-team">${escapeHtml(m.HomeTeam)}</div>
-          <div class="spot-owner">${escapeHtml(homeOwner || 'unassigned')}</div>
-        </div>
-      </div>
-      ${scoreBlock}
-      <div class="spotlight-team away ${winner === m.AwayTeam ? 'is-winner' : ''}">
-        <div class="spot-text right">
-          <div class="spot-team">${escapeHtml(m.AwayTeam)}</div>
-          <div class="spot-owner">${escapeHtml(awayOwner || 'unassigned')}</div>
-        </div>
-        <div class="spot-flag">${awayFlag}</div>
-      </div>
-    </div>
+    ${bodies}
   `;
 
   // Live countdown ticker for the "next" kind.
