@@ -1746,34 +1746,25 @@ function renderParticipants() {
     const teamsHtml = row.teams.map(t => {
       const s = STATE.stats.get(t.Team);
       const elim = t.Eliminated ? ' eliminated' : '';
-      const stage = t.Eliminated ? (canonicalStage(t.EliminationStage) || 'Out') : 'In';
+      // Only call out a stage when the team is actually out — "In" on
+      // every row is just noise when each owner has a single team.
+      const stage = t.Eliminated ? (canonicalStage(t.EliminationStage) || 'Out') : '';
       return `<div class="team-row${elim}">
         <span class="flag-with-name">
           <span class="flag">${(s && s.flag) || flagFor(t.Team)}</span>
           <span class="name">${escapeHtml(t.Team)}</span>
         </span>
-        <span class="team-pts">${escapeHtml(stage)}</span>
+        ${stage ? `<span class="team-pts">${escapeHtml(stage)}</span>` : ''}
       </div>`;
     }).join('');
 
     // Big number reflects the only thing that actually matters:
-    // confirmed prizes won. Falls back to the live in-race count
-    // when nothing's been won yet — gives an owner with 5 races
-    // open visible weight versus an owner with none.
-    let bigNum, bigLabel, bigClass;
-    if (row.prizesWon > 0) {
-      bigNum = String(row.prizesWon).padStart(2, '0');
-      bigLabel = row.prizesWon === 1 ? 'prize won' : 'prizes won';
-      bigClass = 'gold';
-    } else if (row.prizesInRace > 0) {
-      bigNum = String(row.prizesInRace).padStart(2, '0');
-      bigLabel = 'in race';
-      bigClass = '';
-    } else {
-      bigNum = '—';
-      bigLabel = row.alive === 0 ? 'no race' : 'awaiting';
-      bigClass = 'muted';
-    }
+    // confirmed prizes won. When nothing's been won the score block is
+    // dropped entirely rather than padded with "awaiting"/"in race"
+    // noise — the card collapses to just rank + name + team.
+    const hasScore = row.prizesWon > 0;
+    const bigNum = hasScore ? String(row.prizesWon).padStart(2, '0') : '';
+    const bigLabel = hasScore ? (row.prizesWon === 1 ? 'prize won' : 'prizes won') : '';
 
     const rankNum = String(idx + 1).padStart(2, '0');
     const rankClass = idx === 0 && row.prizesWon > 0 && sortKey === 'prizes' ? 'rank-medal medal-1'
@@ -1785,20 +1776,16 @@ function renderParticipants() {
         <span class="${rankClass}">${rankNum}</span>
         <div class="owner-id">
           <div class="name">${escapeHtml(row.name)}</div>
-          <div class="owner-meta">
-            ${row.alive}/${row.teams.length} alive
-          </div>
         </div>
-        <div class="owner-score ${bigClass}">
+        ${hasScore ? `<div class="owner-score gold">
           <div class="score-num">${bigNum}</div>
           <div class="score-label">${escapeHtml(bigLabel)}</div>
-        </div>
+        </div>` : ''}
       </div>
-      <div class="owner-pills">
+      ${row.prizesWon > 0 || (row.alive === 0 && row.teams.length > 0) ? `<div class="owner-pills">
         ${row.prizesWon > 0 ? `<span class="owner-pill won">★ ${row.prizesWon} won</span>` : ''}
-        ${row.prizesInRace > 0 ? `<span class="owner-pill race">${row.prizesInRace} in race</span>` : ''}
         ${row.alive === 0 && row.teams.length > 0 ? `<span class="owner-pill out">All out</span>` : ''}
-      </div>
+      </div>` : ''}
       <div class="teams">${teamsHtml}</div>
     `;
     root.appendChild(card);
