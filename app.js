@@ -72,12 +72,11 @@ const STAGE_ALIASES = {
   'Group Stage':           'Group',
 };
 
-// Country -> FIFA 3-letter code. Used as the visual identity in
-// every flag-shaped slot. We deliberately don't render emoji
-// flags: regional-indicator pairs don't render on Windows Chrome
-// (the office environment), so any emoji-based design would
-// fall back to inconsistent letter pairs. Codes are intentional
-// editorial styling — newspaper match-report convention.
+// Country -> FIFA 3-letter code. Now the flag image's alt text and
+// the fallback chip when an image can't load (see ISO2 / flagFor).
+// We still avoid emoji flags — regional-indicator pairs don't render
+// on Windows Chrome (the office environment) — but a real flag image
+// is reliable, with the code kept as a graceful backstop.
 const COUNTRY_CODE = {
   'Mexico':'MEX', 'Saudi Arabia':'KSA', 'Cameroon':'CMR', 'Jamaica':'JAM',
   'Canada':'CAN', 'Egypt':'EGY', 'Iceland':'ISL', 'Algeria':'ALG',
@@ -95,6 +94,25 @@ const COUNTRY_CODE = {
 // Backwards-compat: callers still reference FLAG_LOOKUP, so
 // keep the symbol alive but make it return the country code.
 const FLAG_LOOKUP = COUNTRY_CODE;
+
+// Country -> ISO 3166-1 alpha-2 (lowercase) — the key flagcdn uses
+// for its flag images. Home nations map to GB subdivision codes
+// (gb-eng / gb-wls). Any country missing here falls back to the
+// 3-letter COUNTRY_CODE chip in flagFor().
+const ISO2 = {
+  'Mexico':'mx', 'Saudi Arabia':'sa', 'Cameroon':'cm', 'Jamaica':'jm',
+  'Canada':'ca', 'Egypt':'eg', 'Iceland':'is', 'Algeria':'dz',
+  'USA':'us', 'Wales':'gb-wls', 'Japan':'jp', 'Costa Rica':'cr',
+  'Argentina':'ar', 'New Zealand':'nz', 'Poland':'pl', 'Tunisia':'tn',
+  'Brazil':'br', 'Switzerland':'ch', 'Serbia':'rs', 'Croatia':'hr',
+  'France':'fr', 'Germany':'de', 'Australia':'au', 'South Korea':'kr',
+  'Spain':'es', 'Belgium':'be', 'Morocco':'ma', 'Ghana':'gh',
+  'England':'gb-eng', 'Netherlands':'nl', 'Portugal':'pt', 'Uruguay':'uy',
+  'Italy':'it', 'Denmark':'dk', 'Ecuador':'ec', 'Iran':'ir',
+  'Colombia':'co', 'Sweden':'se', 'Nigeria':'ng', 'Qatar':'qa',
+  'Norway':'no', 'Czech Republic':'cz', 'Ivory Coast':'ci', 'Panama':'pa',
+  'Austria':'at', 'Turkey':'tr', 'South Africa':'za', 'Bolivia':'bo',
+};
 
 // Prize categories — declarative. Adding a new one is one entry.
 // Each resolver returns: { ranked: [...], leaderRank: <value>, isFinal?: bool, note?: string }
@@ -177,10 +195,17 @@ function parseBool(v) {
   return false;
 }
 function flagFor(team, _override) {
-  // Always render the 3-letter country code regardless of any
-  // workbook FlagEmoji column — emoji rendering is unreliable on
-  // Windows Chrome, and codes give us a consistent design.
-  return COUNTRY_CODE[team] || (team || '').slice(0, 3).toUpperCase() || '—';
+  // Render the country's flag as an image (flagcdn). The 3-letter
+  // COUNTRY_CODE is the alt text and an automatic fallback chip if
+  // the image can't load or the country is unknown — image flags are
+  // reliable (unlike emoji on Windows Chrome) and the code keeps the
+  // old newspaper look as a backstop. Returns an HTML string: every
+  // call site interpolates it as innerHTML inside a .flag-style slot.
+  const code = COUNTRY_CODE[team] || (team || '').slice(0, 3).toUpperCase() || '—';
+  const iso = ISO2[team];
+  if (!iso) return `<span class="flag-code">${escapeHtml(code)}</span>`;
+  return `<img class="flag-img" src="https://flagcdn.com/${iso}.svg"`
+       + ` alt="${escapeHtml(team)} flag" data-code="${escapeHtml(code)}" loading="lazy">`;
 }
 function canonicalStage(s) {
   const t = String(s || '').trim();
@@ -1077,6 +1102,12 @@ function carouselPanels() {
 }
 
 function renderCarousel() {
+  // Group-stage view only. Once we reach the knockout stage the
+  // bracket takes over (clean swap), so the whole section hides.
+  const section = $('#carousel-section');
+  if (section) section.hidden = STATE.phase !== 'group';
+  if (STATE.phase !== 'group') return;
+
   const track = $('#carousel-track');
   track.innerHTML = '';
   const panels = carouselPanels();
@@ -1275,6 +1306,7 @@ function renderKnockoutPanel(stageKey, shortLabel) {
 
 function startCarouselTimer() {
   stopCarouselTimer();
+  if (STATE.phase !== 'group') return;   // carousel only runs in the group stage
   if (!STATE.carouselPlaying) return;
   STATE.carouselTimer = setInterval(() => {
     const panels = carouselPanels();
@@ -2000,11 +2032,10 @@ function renderBracket() {
   const root = $('#bracket');
   if (!section || !root) return;
 
-  // Show whenever the workbook has any knockout fixtures (real or
-  // placeholder). Hidden only if the workbook has none — in which
-  // case we'd render a sea of TBD cards with nothing useful.
-  const haveAny = STATE.matches.some(m => !isGroupStage(m.Stage));
-  if (!haveAny) { section.hidden = true; return; }
+  // The bracket is the knockout-phase counterpart to the group
+  // carousel: hidden during the group stage, then it takes that
+  // section's place once we reach the knockout stage (clean swap).
+  if (STATE.phase === 'group') { section.hidden = true; return; }
   section.hidden = false;
 
   const roundsHtml = BRACKET_ROUNDS.map(stage => {
@@ -2154,6 +2185,17 @@ function trapFocus(modalEl) {
 }
 
 function init() {
+  // Flag images that fail to load fall back to the 3-letter code
+  // chip. The error event doesn't bubble, so listen in the capture
+  // phase to catch it for every .flag-img on the page.
+  document.addEventListener('error', (e) => {
+    const el = e.target;
+    if (el && el.tagName === 'IMG' && el.classList.contains('flag-img') && !el.dataset.fellBack) {
+      el.dataset.fellBack = '1';
+      el.outerHTML = `<span class="flag-code">${escapeHtml(el.dataset.code || '—')}</span>`;
+    }
+  }, true);
+
   // Admin drawer toggle
   $('#admin-toggle').addEventListener('click', () => {
     $('#admin-drawer').hidden = false;

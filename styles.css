@@ -1271,6 +1271,16 @@ main {
   letter-spacing: 1px;
   font-weight: 700;
 }
+/* Real flag image fills its slot; the bordered chip becomes the frame.
+   .flag-code is the text fallback (unknown country or image load fail)
+   and simply inherits the slot's mono/uppercase styling. */
+.flag-img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+.spot-flag, .bracket-flag { overflow: hidden; }
 .flag-with-name {
   display: inline-flex;
   align-items: center;
