@@ -78,18 +78,24 @@ const STAGE_ALIASES = {
 // on Windows Chrome (the office environment) — but a real flag image
 // is reliable, with the code kept as a graceful backstop.
 const COUNTRY_CODE = {
-  'Mexico':'MEX', 'Saudi Arabia':'KSA', 'Cameroon':'CMR', 'Jamaica':'JAM',
-  'Canada':'CAN', 'Egypt':'EGY', 'Iceland':'ISL', 'Algeria':'ALG',
-  'USA':'USA', 'Wales':'WAL', 'Japan':'JPN', 'Costa Rica':'CRC',
-  'Argentina':'ARG', 'New Zealand':'NZL', 'Poland':'POL', 'Tunisia':'TUN',
-  'Brazil':'BRA', 'Switzerland':'SUI', 'Serbia':'SRB', 'Croatia':'CRO',
-  'France':'FRA', 'Germany':'GER', 'Australia':'AUS', 'South Korea':'KOR',
-  'Spain':'ESP', 'Belgium':'BEL', 'Morocco':'MAR', 'Ghana':'GHA',
-  'England':'ENG', 'Netherlands':'NED', 'Portugal':'POR', 'Uruguay':'URU',
-  'Italy':'ITA', 'Denmark':'DEN', 'Ecuador':'ECU', 'Iran':'IRN',
-  'Colombia':'COL', 'Sweden':'SWE', 'Nigeria':'NGA', 'Qatar':'QAT',
-  'Norway':'NOR', 'Czech Republic':'CZE', 'Ivory Coast':'CIV', 'Panama':'PAN',
-  'Austria':'AUT', 'Turkey':'TUR', 'South Africa':'RSA', 'Bolivia':'BOL',
+  // The 48 finalists, named exactly as in the Sheet's Participants tab.
+  'Mexico':'MEX', 'South Africa':'RSA', 'Korea Republic':'KOR', 'Czechia':'CZE',
+  'Canada':'CAN', 'Bosnia and Herzegovina':'BIH', 'Qatar':'QAT', 'Switzerland':'SUI',
+  'Brazil':'BRA', 'Morocco':'MAR', 'Haiti':'HAI', 'Scotland':'SCO',
+  'USA':'USA', 'Paraguay':'PAR', 'Australia':'AUS', 'Türkiye':'TUR',
+  'Germany':'GER', 'Curaçao':'CUW', "Côte d'Ivoire":'CIV', 'Ecuador':'ECU',
+  'Netherlands':'NED', 'Japan':'JPN', 'Sweden':'SWE', 'Tunisia':'TUN',
+  'Belgium':'BEL', 'Egypt':'EGY', 'IR Iran':'IRN', 'New Zealand':'NZL',
+  'Spain':'ESP', 'Cabo Verde':'CPV', 'Saudi Arabia':'KSA', 'Uruguay':'URU',
+  'France':'FRA', 'Senegal':'SEN', 'Iraq':'IRQ', 'Norway':'NOR',
+  'Argentina':'ARG', 'Algeria':'ALG', 'Austria':'AUT', 'Jordan':'JOR',
+  'Portugal':'POR', 'Congo DR':'COD', 'Uzbekistan':'UZB', 'Colombia':'COL',
+  'England':'ENG', 'Croatia':'CRO', 'Ghana':'GHA', 'Panama':'PAN',
+  // Legacy aliases — only the embedded sample data uses these names.
+  'Cameroon':'CMR', 'Iceland':'ISL', 'Wales':'WAL', 'Costa Rica':'CRC',
+  'Poland':'POL', 'Serbia':'SRB', 'South Korea':'KOR', 'Italy':'ITA',
+  'Denmark':'DEN', 'Iran':'IRN', 'Nigeria':'NGA', 'Czech Republic':'CZE',
+  'Ivory Coast':'CIV', 'Turkey':'TUR', 'Bolivia':'BOL', 'Jamaica':'JAM',
 };
 // Backwards-compat: callers still reference FLAG_LOOKUP, so
 // keep the symbol alive but make it return the country code.
@@ -97,22 +103,39 @@ const FLAG_LOOKUP = COUNTRY_CODE;
 
 // Country -> ISO 3166-1 alpha-2 (lowercase) — the key flagcdn uses
 // for its flag images. Home nations map to GB subdivision codes
-// (gb-eng / gb-wls). Any country missing here falls back to the
-// 3-letter COUNTRY_CODE chip in flagFor().
+// (gb-eng / gb-wls / gb-sct). Any country missing here (after the
+// normalised fallback below) falls back to the COUNTRY_CODE chip.
 const ISO2 = {
-  'Mexico':'mx', 'Saudi Arabia':'sa', 'Cameroon':'cm', 'Jamaica':'jm',
-  'Canada':'ca', 'Egypt':'eg', 'Iceland':'is', 'Algeria':'dz',
-  'USA':'us', 'Wales':'gb-wls', 'Japan':'jp', 'Costa Rica':'cr',
-  'Argentina':'ar', 'New Zealand':'nz', 'Poland':'pl', 'Tunisia':'tn',
-  'Brazil':'br', 'Switzerland':'ch', 'Serbia':'rs', 'Croatia':'hr',
-  'France':'fr', 'Germany':'de', 'Australia':'au', 'South Korea':'kr',
-  'Spain':'es', 'Belgium':'be', 'Morocco':'ma', 'Ghana':'gh',
-  'England':'gb-eng', 'Netherlands':'nl', 'Portugal':'pt', 'Uruguay':'uy',
-  'Italy':'it', 'Denmark':'dk', 'Ecuador':'ec', 'Iran':'ir',
-  'Colombia':'co', 'Sweden':'se', 'Nigeria':'ng', 'Qatar':'qa',
-  'Norway':'no', 'Czech Republic':'cz', 'Ivory Coast':'ci', 'Panama':'pa',
-  'Austria':'at', 'Turkey':'tr', 'South Africa':'za', 'Bolivia':'bo',
+  // The 48 finalists, named exactly as in the Sheet's Participants tab.
+  'Mexico':'mx', 'South Africa':'za', 'Korea Republic':'kr', 'Czechia':'cz',
+  'Canada':'ca', 'Bosnia and Herzegovina':'ba', 'Qatar':'qa', 'Switzerland':'ch',
+  'Brazil':'br', 'Morocco':'ma', 'Haiti':'ht', 'Scotland':'gb-sct',
+  'USA':'us', 'Paraguay':'py', 'Australia':'au', 'Türkiye':'tr',
+  'Germany':'de', 'Curaçao':'cw', "Côte d'Ivoire":'ci', 'Ecuador':'ec',
+  'Netherlands':'nl', 'Japan':'jp', 'Sweden':'se', 'Tunisia':'tn',
+  'Belgium':'be', 'Egypt':'eg', 'IR Iran':'ir', 'New Zealand':'nz',
+  'Spain':'es', 'Cabo Verde':'cv', 'Saudi Arabia':'sa', 'Uruguay':'uy',
+  'France':'fr', 'Senegal':'sn', 'Iraq':'iq', 'Norway':'no',
+  'Argentina':'ar', 'Algeria':'dz', 'Austria':'at', 'Jordan':'jo',
+  'Portugal':'pt', 'Congo DR':'cd', 'Uzbekistan':'uz', 'Colombia':'co',
+  'England':'gb-eng', 'Croatia':'hr', 'Ghana':'gh', 'Panama':'pa',
+  // Legacy aliases — only the embedded sample data uses these names.
+  'Cameroon':'cm', 'Iceland':'is', 'Wales':'gb-wls', 'Costa Rica':'cr',
+  'Poland':'pl', 'Serbia':'rs', 'South Korea':'kr', 'Italy':'it',
+  'Denmark':'dk', 'Iran':'ir', 'Nigeria':'ng', 'Czech Republic':'cz',
+  'Ivory Coast':'ci', 'Turkey':'tr', 'Bolivia':'bo', 'Jamaica':'jm',
 };
+
+// Case/accent/punctuation-insensitive lookup, so a Sheet that writes
+// "Turkiye" or "Cote d'Ivoire" (no accents) still resolves a flag.
+const normTeamKey = s => String(s || '')
+  .normalize('NFD').replace(/\p{M}/gu, '')   // strip combining accents
+  .replace(/[^a-z0-9]+/gi, '')               // drop spaces/punctuation
+  .toLowerCase();
+const ISO2_BY_NORM = {};
+const CODE_BY_NORM = {};
+for (const [name, c] of Object.entries(ISO2))         ISO2_BY_NORM[normTeamKey(name)] = c;
+for (const [name, c] of Object.entries(COUNTRY_CODE)) CODE_BY_NORM[normTeamKey(name)] = c;
 
 // Prize categories — declarative. Adding a new one is one entry.
 // Each resolver returns: { ranked: [...], leaderRank: <value>, isFinal?: bool, note?: string }
@@ -201,8 +224,9 @@ function flagFor(team, _override) {
   // reliable (unlike emoji on Windows Chrome) and the code keeps the
   // old newspaper look as a backstop. Returns an HTML string: every
   // call site interpolates it as innerHTML inside a .flag-style slot.
-  const code = COUNTRY_CODE[team] || (team || '').slice(0, 3).toUpperCase() || '—';
-  const iso = ISO2[team];
+  const nk = normTeamKey(team);
+  const iso = ISO2[team] || ISO2_BY_NORM[nk];
+  const code = COUNTRY_CODE[team] || CODE_BY_NORM[nk] || (team || '').slice(0, 3).toUpperCase() || '—';
   if (!iso) return `<span class="flag-code">${escapeHtml(code)}</span>`;
   return `<img class="flag-img" src="https://flagcdn.com/${iso}.svg"`
        + ` alt="${escapeHtml(team)} flag" data-code="${escapeHtml(code)}" loading="lazy">`;
