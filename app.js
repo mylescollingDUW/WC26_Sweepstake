@@ -188,9 +188,10 @@ const $  = sel => document.querySelector(sel);
 const $$ = sel => Array.from(document.querySelectorAll(sel));
 
 function setStatus(msg, kind) {
-  const el = $('#status');
-  el.textContent = msg || '';
-  el.className = 'status ' + (kind || '');
+  // Diagnostics only — kept off the page so office viewers don't see
+  // load/status chatter. Routed to the browser console instead.
+  if (!msg) return;
+  (kind === 'error' ? console.warn : console.log)('[sweepstake]', msg);
 }
 function n(v) { return Number(v) || 0; }
 function fmtDate(d) {
@@ -1799,13 +1800,6 @@ function renderParticipants() {
   const sortKey = STATE.ownersSort || 'prizes';
   const ranked = sortOwners(all, sortKey);
 
-  // Sync sort buttons.
-  document.querySelectorAll('[data-owners-sort]').forEach(btn => {
-    const isActive = btn.dataset.ownersSort === sortKey;
-    btn.classList.toggle('is-active', isActive);
-    btn.setAttribute('aria-selected', String(isActive));
-  });
-
   ranked.forEach((row, idx) => {
     const card = document.createElement('div');
     card.className = 'participant-card';
@@ -2311,14 +2305,6 @@ function init() {
   $('#leaderboard-search').addEventListener('input', e => {
     STATE.filter = e.target.value;
     renderLeaderboard();
-  });
-
-  // Owners scoreboard sort tabs
-  document.querySelectorAll('[data-owners-sort]').forEach(btn => {
-    btn.addEventListener('click', () => {
-      STATE.ownersSort = btn.dataset.ownersSort;
-      renderParticipants();
-    });
   });
 
   // First load
