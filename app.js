@@ -906,11 +906,27 @@ function buildState({ participants, matches, awards: awardRows, goldenBoot: gbRo
       const group = isGroupStage(stage) ? (groupByTeam[homeTeam] || '') : '';
       const minutesRaw = r.Minutes;
       const minutes = minutesRaw === '' || minutesRaw == null ? 90 : Number(minutesRaw) || 90;
+      // Combine the Date (M/D/YYYY, parsed as local midnight) with the Time
+      // column (HH:MM, 24h UK time) into one local Date. Office viewers are
+      // in London, so local time == the UK kick-off time. HasKickoff lets the
+      // spotlight show a real time and count down to it, while fixtures with
+      // no time entered fall back cleanly instead of printing "00:00".
+      let matchDate = r.Date ? new Date(r.Date) : '';
+      let hasKickoff = false;
+      const tm = /^(\d{1,2}):(\d{2})$/.exec(String(r.Time || '').trim());
+      if (matchDate instanceof Date && !isNaN(matchDate) && tm) {
+        const hh = Number(tm[1]), mm = Number(tm[2]);
+        if (hh >= 0 && hh <= 23 && mm >= 0 && mm <= 59) {
+          matchDate.setHours(hh, mm, 0, 0);
+          hasKickoff = true;
+        }
+      }
       const homeScore = r['Home Score'] === '' || r['Home Score'] == null ? '' : Number(r['Home Score']);
       const awayScore = r['Away Score'] === '' || r['Away Score'] == null ? '' : Number(r['Away Score']);
       return {
         MatchID: 'M' + String(i + 1).padStart(3, '0'),
-        Date: r.Date ? new Date(r.Date) : '',
+        Date: matchDate,
+        HasKickoff: hasKickoff,
         Stage: stage,
         Group: group,
         HomeTeam: homeTeam,
@@ -1922,16 +1938,19 @@ function fmtKickoff(dt) {
 
 function spotlightStatusLine(spot) {
   const dt = spot.date;
+  const m0 = spot.matches[0];
   if (spot.kind === 'live') {
     const count = spot.matches.length;
     if (count > 1) return { tag: 'TODAY', label: count + ' matches today' };
     if (!dt) return { tag: 'TODAY', label: 'Match scheduled today' };
-    if (hasResult(spot.matches[0])) return { tag: 'TODAY', label: 'Result' };
-    return { tag: 'TODAY', label: 'Kick-off ' + fmtKickoff(dt) };
+    if (hasResult(m0)) return { tag: 'TODAY', label: 'Result' };
+    return { tag: 'TODAY', label: m0 && m0.HasKickoff ? 'Kick-off ' + fmtKickoff(dt) : 'Scheduled today' };
   }
   if (spot.kind === 'next') {
     const ms = dt - new Date();
-    return { tag: 'NEXT UP', label: formatCountdown(ms) + ' · ' + dt.toLocaleDateString(undefined, { weekday: 'short', month: 'short', day: 'numeric' }) };
+    const day = dt.toLocaleDateString(undefined, { weekday: 'short', month: 'short', day: 'numeric' });
+    const time = m0 && m0.HasKickoff ? ' · ' + fmtKickoff(dt) : '';
+    return { tag: 'NEXT UP', label: formatCountdown(ms) + ' · ' + day + time };
   }
   if (spot.kind === 'recent') {
     return { tag: 'JUST IN', label: 'Most recent result · ' + (dt ? fmtShortDate(dt) : '') };
@@ -1964,7 +1983,7 @@ function spotlightMatchBody(m, spot) {
     // Today's upcoming games show their kick-off time where the score
     // will go; the lone "next" preview keeps the simple "vs".
     const dt = m.Date instanceof Date ? m.Date : (m.Date ? new Date(m.Date) : null);
-    centre = spot.kind === 'live' && dt && !isNaN(dt)
+    centre = spot.kind === 'live' && m.HasKickoff && dt && !isNaN(dt)
       ? `<div class="spot-time">${escapeHtml(fmtKickoff(dt))}</div>`
       : `<div class="spotlight-vs">vs</div>`;
   }
@@ -2028,13 +2047,15 @@ function renderSpotlight() {
 
   // Live countdown ticker for the "next" kind.
   if (spot.kind === 'next' && spot.date) {
+    const nextMatch = spot.matches[0];
+    const timeSuffix = nextMatch && nextMatch.HasKickoff ? ' · ' + fmtKickoff(spot.date) : '';
     STATE.spotlightTimer = setInterval(() => {
       const el = document.getElementById('spotlight-countdown');
       if (!el) { clearInterval(STATE.spotlightTimer); return; }
       const ms = spot.date - new Date();
       if (ms <= 0) { renderSpotlight(); return; }
       const dt = spot.date;
-      el.textContent = formatCountdown(ms) + ' · ' + dt.toLocaleDateString(undefined, { weekday: 'short', month: 'short', day: 'numeric' });
+      el.textContent = formatCountdown(ms) + ' · ' + dt.toLocaleDateString(undefined, { weekday: 'short', month: 'short', day: 'numeric' }) + timeSuffix;
     }, 30000);
   }
 }
