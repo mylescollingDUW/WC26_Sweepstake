@@ -693,7 +693,7 @@ function prizeGoldenBoot(stats, ctx) {
       participant: s ? s.participant : participantFor(ctx.teams, sc.country),
       flag: s ? s.flag : flagFor(sc.country),
       value: sc.goals,
-      valueLabel: sc.goals + ' goals — ' + sc.player,
+      valueLabel: sc.goals + (Number(sc.goals) === 1 ? ' goal — ' : ' goals — ') + sc.player,
       eliminated: false,
       group: s ? s.group : (groupFor(ctx.teams, sc.country) || ''),
     };
@@ -1388,7 +1388,15 @@ function renderPrizeCards() {
     card.className = 'prize-card' + (p.podium ? ' podium' : '') + (p.isFinal ? ' final' : '');
     card.setAttribute('aria-label', 'Open race for ' + p.label);
 
-    const leaders = p.ranked.filter(r => r.status === 'leading' || r.status === 'won');
+    // Collapse multiple leaders from the same team into one row. This
+    // matters for Golden Boot, where two scorers from one country would
+    // otherwise render as identical team+owner rows; the full per-player
+    // list is still shown in the tap-through race modal. Every other
+    // prize already has one row per team, so this is a no-op for them.
+    const seenLeaderTeams = new Set();
+    const leaders = p.ranked
+      .filter(r => r.status === 'leading' || r.status === 'won')
+      .filter(r => !seenLeaderTeams.has(r.team) && seenLeaderTeams.add(r.team));
     const top = leaders[0];
     const tieCount = leaders.length - 1;
 
@@ -1481,23 +1489,26 @@ function renderStatusChip(prize, leader) {
   return `<span class="chip chip-leading">Current leader</span>`;
 }
 
+function appendUnit(v, prize, value) {
+  if (!prize.unit) return v;
+  if (prize.unit === '%') return v + '%';                                  // tight: "62%"
+  if (prize.unit === 'goals')                                             // pluralise: "1 goal" / "2 goals"
+    return v + ' ' + (Math.abs(Number(value)) === 1 ? 'goal' : 'goals');
+  return v + ' ' + prize.unit;
+}
 function formatPrizeValue(item, prize) {
   // Long form for the race-modal table — includes any free-text
   // valueLabel (e.g. score breakdown for "Highest-scoring match").
   if (item.valueLabel) return item.valueLabel;
   if (item.value === '' || item.value == null) return '';
-  const v = formatNumeric(item.value, prize);
-  if (prize.unit) return v + ' ' + prize.unit;
-  return v;
+  return appendUnit(formatNumeric(item.value, prize), prize, item.value);
 }
 function formatPrizeValueShort(item, prize) {
   // Tight form for the prize-card grid: no valueLabel — that
   // text overflows the card. Always "<value> <unit>" or just
   // value, never the long contextual variant.
   if (item.value === '' || item.value == null) return '';
-  const v = formatNumeric(item.value, prize);
-  if (prize.unit) return v + ' ' + prize.unit;
-  return v;
+  return appendUnit(formatNumeric(item.value, prize), prize, item.value);
 }
 function formatNumeric(value, prize) {
   if (typeof value === 'number' && prize && prize.decimals != null) {
