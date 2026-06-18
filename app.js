@@ -146,12 +146,12 @@ const PRIZE_CATEGORIES = [
   { key: 'runnerup',       label: '2nd Place',                podium: 2, resolver: prizeFinalPosition(2), unit: '' },
   { key: 'third',          label: '3rd Place',                podium: 3, resolver: prizeFinalPosition(3), unit: '' },
   { key: 'goldenBoot',     label: 'Golden Boot',                         resolver: prizeGoldenBoot,                              unit: 'goals' },
-  { key: 'biggestLoss',    label: 'Largest negative goal difference',    resolver: prizeMin('goalDifference', { minMatches: 1 }),  unit: 'GD' },
-  { key: 'shotsP90',       label: 'Most shots / 90',                     resolver: prizeMax('shotsP90',    { minMatches: 1 }),    unit: '', decimals: 2 },
-  { key: 'avgPoss',        label: 'Highest avg possession',              resolver: prizeMax('avgPossession', { minMatches: 1 }),  unit: '%', decimals: 1 },
-  { key: 'foulsP90',       label: 'Most fouls / 90',                     resolver: prizeMax('foulsP90',    { minMatches: 1 }),    unit: '', decimals: 2 },
-  { key: 'offsidesP90',    label: 'Most offsides / 90',                  resolver: prizeMax('offsidesP90', { minMatches: 1 }),    unit: '', decimals: 2 },
-  { key: 'cornersP90',     label: 'Most corners / 90',                   resolver: prizeMax('cornersP90',  { minMatches: 1 }),    unit: '', decimals: 2 },
+  { key: 'biggestLoss',    label: 'Largest negative goal difference',    resolver: prizeMin('goalDifference', { minMatches: 1 }),  unit: 'GD', avg: true },
+  { key: 'shotsP90',       label: 'Most shots / 90',                     resolver: prizeMax('shotsP90',    { minMatches: 1 }),    unit: '', decimals: 2, avg: true },
+  { key: 'avgPoss',        label: 'Highest avg possession',              resolver: prizeMax('avgPossession', { minMatches: 1 }),  unit: '%', decimals: 1, avg: true },
+  { key: 'foulsP90',       label: 'Most fouls / 90',                     resolver: prizeMax('foulsP90',    { minMatches: 1 }),    unit: '', decimals: 2, avg: true },
+  { key: 'offsidesP90',    label: 'Most offsides / 90',                  resolver: prizeMax('offsidesP90', { minMatches: 1 }),    unit: '', decimals: 2, avg: true },
+  { key: 'cornersP90',     label: 'Most corners / 90',                   resolver: prizeMax('cornersP90',  { minMatches: 1 }),    unit: '', decimals: 2, avg: true },
 ];
 
 // ============================================================
@@ -770,12 +770,23 @@ function resolveAllPrizes(state) {
         else if (it.status === 'contention') it.status = 'eliminated';
       }
     }
+    // Field average across the ranked pool — a benchmark so viewers can
+    // gauge how the leader (and their own team) compares to the field.
+    // Stat prizes only (p.avg); podium / Golden Boot have no meaningful one.
+    let fieldAvg = null;
+    if (p.avg && r.ranked && r.ranked.length) {
+      const nums = r.ranked
+        .map(x => Number(x.value))
+        .filter(v => !isNaN(v) && isFinite(v));
+      if (nums.length) fieldAvg = nums.reduce((a, b) => a + b, 0) / nums.length;
+    }
     return {
       key: p.key,
       label: p.label,
       podium: !!p.podium,
       unit: p.unit,
       decimals: p.decimals,
+      fieldAvg,
       description: prizeDescription(p.key),
       prizeValue: (sheetRow && sheetRow.PrizeValue) || '',
       isFinal,
@@ -1423,6 +1434,7 @@ function renderPrizeCards() {
       body = `<div class="empty">${escapeHtml(p.note || 'Awaiting data')}</div>`;
     } else {
       const valueDisplay = formatPrizeValueShort(top, p);
+      const avgDisplay = formatAvg(p);
       const MAX_VISIBLE_LEADERS = 3;
       const visibleLeaders = leaders.slice(0, MAX_VISIBLE_LEADERS);
       const overflow = Math.max(0, leaders.length - MAX_VISIBLE_LEADERS);
@@ -1443,7 +1455,10 @@ function renderPrizeCards() {
       body = `
         <div class="winner-row${stackedClass}">
           <div class="winners-stack">${leaderRows}${overflowRow}</div>
-          ${valueDisplay ? `<div class="stat">${escapeHtml(valueDisplay)}</div>` : ''}
+          ${valueDisplay ? `<div class="stat-block">
+            <div class="stat">${escapeHtml(valueDisplay)}</div>
+            ${avgDisplay ? `<div class="stat-avg">${escapeHtml(avgDisplay)}</div>` : ''}
+          </div>` : ''}
         </div>
         ${renderLeadBar(p, leadInfo, tieCount)}`;
     }
@@ -1518,6 +1533,16 @@ function formatPrizeValueShort(item, prize) {
   if (item.value === '' || item.value == null) return '';
   return appendUnit(formatNumeric(item.value, prize), prize, item.value);
 }
+function avgValueText(prize) {
+  // The field-average value, formatted like a leader value: "15" / "50%" / "0 GD".
+  if (!prize || prize.fieldAvg == null) return '';
+  const decimals = prize.decimals != null ? prize.decimals : 1;
+  return appendUnit(trimNumeric(prize.fieldAvg, decimals), prize, prize.fieldAvg);
+}
+function formatAvg(prize) {
+  const v = avgValueText(prize);
+  return v ? 'avg ' + v : '';
+}
 function trimNumeric(value, decimals) {
   // Round to the given precision, then drop trailing zeros so a clean
   // 13.00 reads "13" while a genuine 13.67 keeps its decimals. Also
@@ -1559,6 +1584,20 @@ function openRaceModal(prize) {
     const hasLabels = prize.ranked.some(r => r.valueLabel);
     const showBar = !hasLabels && numericValues.length > 1 && maxNumeric !== minNumeric;
 
+    // Bar position for a value, on the shared 0–100% scale (inverse for
+    // "min" prizes, where smaller is better). Used for the per-row fills
+    // and the field-average marker so they line up.
+    const clampPct = x => Math.max(0, Math.min(100, x));
+    const barPctFor = v => {
+      if (isMin) {
+        return maxNumeric === minNumeric ? 100
+          : Math.round(((maxNumeric - v) / (maxNumeric - minNumeric)) * 100);
+      }
+      return maxNumeric === 0 ? 0 : Math.round((v / maxNumeric) * 100);
+    };
+    const avgPct = (showBar && prize.fieldAvg != null && isFinite(prize.fieldAvg))
+      ? clampPct(barPctFor(prize.fieldAvg)) : null;
+
     const rows = prize.ranked.map(r => {
       const tied = r.value === leaderValue && (r.status === 'leading' || r.status === 'won');
       const cls = [];
@@ -1575,17 +1614,12 @@ function openRaceModal(prize) {
       let barPct = 0;
       const numv = Number(r.value);
       if (showBar && !isNaN(numv) && isFinite(numv)) {
-        if (isMin) {
-          // For min-style prizes, smaller = better -> bigger bar.
-          barPct = maxNumeric === minNumeric ? 100
-            : Math.round(((maxNumeric - numv) / (maxNumeric - minNumeric)) * 100);
-        } else {
-          barPct = maxNumeric === 0 ? 0 : Math.round((numv / maxNumeric) * 100);
-        }
-        barPct = Math.max(0, Math.min(100, barPct));
+        barPct = clampPct(barPctFor(numv));
       }
+      const avgMarker = avgPct != null
+        ? `<span class="value-bar-avg" style="left:${avgPct}%"></span>` : '';
       const valueCell = showBar
-        ? `<td class="value-cell"><span class="value-bar"><span class="value-bar-fill" style="width:${barPct}%"></span></span>${escapeHtml(valueText || '')}</td>`
+        ? `<td class="value-cell"><span class="value-bar"><span class="value-bar-fill" style="width:${barPct}%"></span>${avgMarker}</span>${escapeHtml(valueText || '')}</td>`
         : `<td class="num value">${escapeHtml(valueText || '')}</td>`;
       return `
         <tr class="${cls.join(' ')}">
@@ -1601,7 +1635,11 @@ function openRaceModal(prize) {
           <td>${chipFor(r.status)}</td>
         </tr>`;
     }).join('');
+    const avgNote = avgPct != null
+      ? `<p class="race-avg-note"><span class="avg-tick" aria-hidden="true"></span>Dashed line &mdash; field average (${escapeHtml(avgValueText(prize))})</p>`
+      : '';
     body.innerHTML = `
+      ${avgNote}
       <table class="race-table">
         <thead><tr>
           <th>#</th><th>Team</th><th>Owner</th><th class="num">${showBar ? 'Race' : 'Value'}</th><th>Status</th>
