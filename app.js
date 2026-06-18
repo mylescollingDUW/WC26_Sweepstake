@@ -686,9 +686,16 @@ function prizeGoldenBoot(stats, ctx) {
     return { ranked: [], leaderRank: null, note: 'No goals tracked yet', autoFinal: false };
   }
   const top = scorers[0].goals;
-  const items = scorers.map(sc => {
+  // The prize is "team of the tournament's top scorer", so the race is
+  // between teams, not individuals. scorers is sorted goals-desc, so the
+  // first time we see a country is its top scorer — keep that row only.
+  const seen = new Set();
+  const items = [];
+  for (const sc of scorers) {
+    if (seen.has(sc.country)) continue;
+    seen.add(sc.country);
     const s = stats.get(sc.country);
-    return {
+    items.push({
       team: sc.country,
       participant: s ? s.participant : participantFor(ctx.teams, sc.country),
       flag: s ? s.flag : flagFor(sc.country),
@@ -696,8 +703,8 @@ function prizeGoldenBoot(stats, ctx) {
       valueLabel: sc.goals + (Number(sc.goals) === 1 ? ' goal — ' : ' goals — ') + sc.player,
       eliminated: false,
       group: s ? s.group : (groupFor(ctx.teams, sc.country) || ''),
-    };
-  });
+    });
+  }
   items.sort((a, b) => b.value - a.value);
   return { ranked: rankAndStatus(items), leaderRank: top, autoFinal: false };
 }
@@ -768,6 +775,7 @@ function resolveAllPrizes(state) {
       label: p.label,
       podium: !!p.podium,
       unit: p.unit,
+      decimals: p.decimals,
       description: prizeDescription(p.key),
       prizeValue: (sheetRow && sheetRow.PrizeValue) || '',
       isFinal,
@@ -1510,9 +1518,15 @@ function formatPrizeValueShort(item, prize) {
   if (item.value === '' || item.value == null) return '';
   return appendUnit(formatNumeric(item.value, prize), prize, item.value);
 }
+function trimNumeric(value, decimals) {
+  // Round to the given precision, then drop trailing zeros so a clean
+  // 13.00 reads "13" while a genuine 13.67 keeps its decimals. Also
+  // launders float noise like 12.9999999999998 -> "13".
+  return String(Number(value.toFixed(decimals)));
+}
 function formatNumeric(value, prize) {
   if (typeof value === 'number' && prize && prize.decimals != null) {
-    return value.toFixed(prize.decimals);
+    return trimNumeric(value, prize.decimals);
   }
   return String(value);
 }
@@ -1538,7 +1552,12 @@ function openRaceModal(prize) {
     const maxNumeric = numericValues.length ? Math.max(...numericValues) : 0;
     const minNumeric = numericValues.length ? Math.min(...numericValues) : 0;
     const isMin = (leaderValue === minNumeric && leaderValue !== maxNumeric);
-    const showBar = numericValues.length > 1 && maxNumeric !== minNumeric;
+    // The magnitude bar assumes a short numeric value sitting at the
+    // right edge. Prizes with a descriptive valueLabel (e.g. Golden
+    // Boot's "3 goals — Messi") are too long and the bar would strike
+    // through the text, so skip it for those.
+    const hasLabels = prize.ranked.some(r => r.valueLabel);
+    const showBar = !hasLabels && numericValues.length > 1 && maxNumeric !== minNumeric;
 
     const rows = prize.ranked.map(r => {
       const tied = r.value === leaderValue && (r.status === 'leading' || r.status === 'won');
@@ -1732,7 +1751,7 @@ function renderLeaderboard() {
         td.textContent = (s.goalDifference >= 0 ? '+' : '') + s.goalDifference;
       } else if (col.decimals != null) {
         const v = Number(s[col.key]);
-        td.textContent = isFinite(v) ? v.toFixed(col.decimals) : '—';
+        td.textContent = isFinite(v) ? trimNumeric(v, col.decimals) : '—';
       } else {
         td.textContent = s[col.key];
       }
