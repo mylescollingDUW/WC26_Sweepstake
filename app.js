@@ -1580,7 +1580,7 @@ function renderLeadBar(prize, leadInfo, tieCount) {
   const pct = Math.max(15, Math.min(100, Math.round((leadInfo.gap / max) * 100)));
   return `<div class="lead-bar" aria-hidden="true">
     <span class="lead-rail"><span class="lead-fill" style="width:${pct}%"></span></span>
-    <span class="lead-text">+${leadInfo.gap} clear</span>
+    <span class="lead-text">+${escapeHtml(formatNumeric(leadInfo.gap, prize))} clear</span>
   </div>`;
 }
 
