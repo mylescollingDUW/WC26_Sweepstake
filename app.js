@@ -240,6 +240,18 @@ function isGroupStage(s) {
   const c = canonicalStage(s);
   return c === 'Group' || c === 'Group Stage';
 }
+// Team-name variants seen in the Match Data tab that must collapse onto
+// the exact spelling used in the Participants tab (the canonical key for
+// stats, flags and owners). Without this a single stray spelling in a
+// knockout row loses that team's flag/owner and — worse — could flag a
+// qualified team as eliminated. Bias the map toward the Participants name.
+const TEAM_ALIASES = {
+  'DR Congo': 'Congo DR',
+};
+function canonicalTeam(name) {
+  const t = String(name || '').trim();
+  return TEAM_ALIASES[t] || t;
+}
 function hasResult(m) {
   return m.HomeGoals !== '' && m.HomeGoals != null
       && m.AwayGoals !== '' && m.AwayGoals != null;
@@ -734,6 +746,70 @@ function detectPhase(matches, awards) {
   return 'group';
 }
 
+// Short, friendly label for an elimination stage badge ("Groups" reads
+// better than the canonical "Group"; knockout rounds keep their names).
+function eliminationStageLabel(stage) {
+  const c = canonicalStage(stage);
+  if (c === 'Group' || c === 'Group Stage') return 'Groups';
+  return c || 'Out';
+}
+
+// Decide a knockout tie's winner/loser. Prefers an explicit "Winning
+// Team" (covers ties settled on penalties), else falls back to the
+// score. Returns null when level with no recorded winner — undecided,
+// so neither side is treated as out.
+function decideWinner(m) {
+  if (!m.HomeTeam || !m.AwayTeam) return null;
+  const hg = n(m.HomeGoals), ag = n(m.AwayGoals);
+  let winner = '';
+  if (m.Winner && (m.Winner === m.HomeTeam || m.Winner === m.AwayTeam)) winner = m.Winner;
+  else if (hg > ag) winner = m.HomeTeam;
+  else if (ag > hg) winner = m.AwayTeam;
+  else return null;
+  return { winner, loser: winner === m.HomeTeam ? m.AwayTeam : m.HomeTeam };
+}
+
+// Derive who's knocked out purely from results, so the All-Teams table
+// and Owners cards update themselves as games are entered. Two sources:
+//   (1) the losing side of any completed knockout tie, and
+//   (2) once the full Round-of-32 draw is in, every team that didn't
+//       make the cut (i.e. isn't anywhere in the bracket).
+// Deliberately biased against false positives — a team is only ever
+// marked out on a settled result or a complete 32-team draw, since a
+// wrongly struck-out team is far worse than one marked out a bit late.
+function applyEliminations(teams, matches, phase) {
+  for (const t of teams) { t.Eliminated = false; t.EliminationStage = ''; t.EliminationDate = ''; }
+  const byTeam = new Map(teams.map(t => [t.Team, t]));
+
+  const ko = matches.filter(m =>
+    !isGroupStage(m.Stage) && m.HomeTeam && m.HomeTeam !== 'TBD'
+    && m.AwayTeam && m.AwayTeam !== 'TBD');
+
+  // (1) Knockout losers.
+  for (const m of ko) {
+    if (!hasResult(m)) continue;
+    const res = decideWinner(m);
+    if (!res) continue;
+    const t = byTeam.get(res.loser);
+    if (t) { t.Eliminated = true; t.EliminationStage = canonicalStage(m.Stage); t.EliminationDate = m.Date; }
+  }
+
+  // (2) Group-stage non-qualifiers — only once the R32 draw is complete
+  // (16 ties / 32 distinct teams), so a half-entered draw can't strike
+  // anyone out by mistake.
+  const r32 = ko.filter(m => canonicalStage(m.Stage) === 'Round of 32');
+  const qualified = new Set();
+  r32.forEach(m => { qualified.add(m.HomeTeam); qualified.add(m.AwayTeam); });
+  if (phase !== 'group' && r32.length === 16 && qualified.size === 32) {
+    for (const t of teams) {
+      if (!t.Eliminated && !qualified.has(t.Team)) {
+        t.Eliminated = true;
+        t.EliminationStage = 'Group';
+      }
+    }
+  }
+}
+
 function isPrizeFinal(prizeCat, sheetRow, phase, hasFinalPos1) {
   // Manual override always wins.
   if (sheetRow && parseBool(sheetRow.IsFinal)) return true;
@@ -921,8 +997,8 @@ function buildState({ participants, matches, awards: awardRows, goldenBoot: gbRo
     .filter(r => String(r['Home Team'] || '').trim() && String(r['Away Team'] || '').trim())
     .map((r, i) => {
       const stage = canonicalStage(r.Stage);
-      const homeTeam = String(r['Home Team']).trim();
-      const awayTeam = String(r['Away Team']).trim();
+      const homeTeam = canonicalTeam(r['Home Team']);
+      const awayTeam = canonicalTeam(r['Away Team']);
       const group = isGroupStage(stage) ? (groupByTeam[homeTeam] || '') : '';
       const minutesRaw = r.Minutes;
       const minutes = minutesRaw === '' || minutesRaw == null ? 90 : Number(minutesRaw) || 90;
@@ -978,7 +1054,7 @@ function buildState({ participants, matches, awards: awardRows, goldenBoot: gbRo
         AwayPenaltiesConceded: 0,
         HomeNotableEvents: '',
         AwayNotableEvents: '',
-        Winner: '',
+        Winner: canonicalTeam(r['Winning Team']),
         Notes: '',
       };
     });
@@ -1023,8 +1099,11 @@ function setData({ teams, matches, prizes, awards, goldenBoot }, source) {
   STATE.prizes = prizes || [];
   STATE.awards = awards || {};
   STATE.goldenBoot = goldenBoot || [];
-  STATE.stats = computeTeamStats(teams, matches);
   STATE.phase = detectPhase(matches, STATE.awards);
+  // Derive eliminations onto the team objects BEFORE rolling up stats,
+  // so computeTeamStats picks up Eliminated/EliminationStage for free.
+  applyEliminations(teams, matches, STATE.phase);
+  STATE.stats = computeTeamStats(teams, matches);
   STATE.carouselMode = STATE.phase === 'group' ? 'group' : 'knockout';
   STATE.carouselIndex = 0;
   STATE.prizeResults = resolveAllPrizes(STATE);
@@ -1882,7 +1961,7 @@ function renderParticipants() {
       const elim = t.Eliminated ? ' eliminated' : '';
       // Only call out a stage when the team is actually out — "In" on
       // every row is just noise when each owner has a single team.
-      const stage = t.Eliminated ? (canonicalStage(t.EliminationStage) || 'Out') : '';
+      const stage = t.Eliminated ? eliminationStageLabel(t.EliminationStage) : '';
       return `<div class="team-row${elim}">
         <span class="flag-with-name">
           <span class="flag">${(s && s.flag) || flagFor(t.Team)}</span>
@@ -2206,7 +2285,7 @@ function bracketMatchCard(m, stage) {
   const hg = n(m.HomeGoals), ag = n(m.AwayGoals);
   const hpen = m.HomePenaltyGoals, apen = m.AwayPenaltyGoals;
   const onPens = hpen !== '' && hpen != null && apen !== '' && apen != null;
-  const winner = m.Winner || (played && hg !== ag ? (hg > ag ? m.HomeTeam : m.AwayTeam) : '');
+  const winner = played ? (m.Winner || (hg !== ag ? (hg > ag ? m.HomeTeam : m.AwayTeam) : '')) : '';
   const homeS = STATE.stats.get(m.HomeTeam);
   const awayS = STATE.stats.get(m.AwayTeam);
   const homeOwner = (homeS && homeS.participant) || '';
