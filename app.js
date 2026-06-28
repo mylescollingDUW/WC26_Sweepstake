@@ -2146,13 +2146,13 @@ function renderBracket() {
   section.hidden = false;
 
   const roundsHtml = BRACKET_ROUNDS.map(stage => {
+    // Order by Sheet row (MatchID is assigned by row index, zero-padded
+    // so a string sort == row order). The workbook lists each knockout
+    // round top-to-bottom in bracket order, NOT by date, so we honour that
+    // rather than re-sorting by kick-off time.
     const fixtures = STATE.matches
       .filter(m => canonicalStage(m.Stage) === stage)
-      .sort((a, b) => {
-        const da = a.Date instanceof Date ? a.Date.getTime() : new Date(a.Date).getTime() || 0;
-        const db = b.Date instanceof Date ? b.Date.getTime() : new Date(b.Date).getTime() || 0;
-        return da - db;
-      });
+      .sort((a, b) => String(a.MatchID).localeCompare(String(b.MatchID)));
     const expectedCount = stage === 'Round of 32' ? 16
                        : stage === 'Round of 16' ? 8
                        : stage === 'Quarter-finals' ? 4
