@@ -994,7 +994,17 @@ function buildState({ participants, matches, awards: awardRows, goldenBoot: gbRo
   const groupByTeam = Object.fromEntries(teams.map(t => [t.Team, t.Group]));
 
   const normalizedMatches = matches
-    .filter(r => String(r['Home Team'] || '').trim() && String(r['Away Team'] || '').trim())
+    .filter(r => {
+      const home = String(r['Home Team'] || '').trim();
+      const away = String(r['Away Team'] || '').trim();
+      const stage = canonicalStage(r.Stage);
+      if (!stage) return false;                  // skip blank / junk rows
+      if (isGroupStage(stage)) return home && away; // group rows need both teams
+      // Keep every knockout row, even all-TBD ones, so the bracket lays out
+      // its full set of slots and fills them as formula-fed winners land
+      // (lets "Canada vs TBD" show the moment one feeder is decided).
+      return true;
+    })
     .map((r, i) => {
       const stage = canonicalStage(r.Stage);
       const homeTeam = canonicalTeam(r['Home Team']);
@@ -2237,16 +2247,14 @@ function renderBracket() {
                        : stage === 'Quarter-finals' ? 4
                        : stage === 'Semi-finals' ? 2
                        : 1;
-    const fixturesWithTeams = fixtures.filter(f => f.HomeTeam && f.AwayTeam);
+    // A round shows its individual slots as soon as ANY team in it is known
+    // (one feeder decided → "Canada vs TBD"). While a round is entirely
+    // unknown it stays collapsed as a single compact "N matches TBD".
+    const anyKnown = fixtures.some(f => f.HomeTeam || f.AwayTeam);
     let cards;
-    if (fixturesWithTeams.length) {
-      // Some real fixtures: render those, padded with placeholders only if we
-      // know about additional empty rows in the workbook for this round.
-      cards = (fixtures.length === expectedCount ? fixtures : fixturesWithTeams)
-        .map(m => bracketMatchCard(m, stage)).join('');
+    if (anyKnown) {
+      cards = fixtures.map(m => bracketMatchCard(m, stage)).join('');
     } else {
-      // No teams set yet for this round: collapse to a single
-      // "N matches TBD" placeholder rather than N empty cards.
       cards = `<div class="bracket-match tbd bracket-empty"><div class="bracket-team"><span class="bracket-name muted">${expectedCount} match${expectedCount === 1 ? '' : 'es'} TBD</span></div></div>`;
     }
     return `
@@ -2261,7 +2269,10 @@ function renderBracket() {
 
   // 3rd place play-off, shown as an aside.
   const third = STATE.matches.find(m => canonicalStage(m.Stage) === 'Third Place');
-  const thirdHtml = third ? `
+  // Only surface the 3rd-place play-off once at least one finalist-loser is
+  // known — otherwise its all-TBD row is just noise before the semis.
+  const thirdKnown = third && (third.HomeTeam || third.AwayTeam);
+  const thirdHtml = thirdKnown ? `
     <div class="bracket-aside">
       <div class="bracket-round-head">
         <span class="bracket-round-name">3rd Place</span>
@@ -2274,42 +2285,39 @@ function renderBracket() {
 }
 
 function bracketMatchCard(m, stage) {
-  if (!m || !m.HomeTeam || !m.AwayTeam) {
-    return `
-      <div class="bracket-match tbd">
-        <div class="bracket-team"><span class="bracket-flag muted">·</span><span class="bracket-name muted">TBD</span><span></span><span class="bracket-goals muted">·</span></div>
-        <div class="bracket-team"><span class="bracket-flag muted">·</span><span class="bracket-name muted">TBD</span><span></span><span class="bracket-goals muted">·</span></div>
-      </div>`;
-  }
-  const played = hasResult(m);
-  const hg = n(m.HomeGoals), ag = n(m.AwayGoals);
-  const hpen = m.HomePenaltyGoals, apen = m.AwayPenaltyGoals;
+  const homeTeam = (m && m.HomeTeam) || '';
+  const awayTeam = (m && m.AwayTeam) || '';
+  const played = m ? hasResult(m) : false;
+  const hg = n(m && m.HomeGoals), ag = n(m && m.AwayGoals);
+  const hpen = m && m.HomePenaltyGoals, apen = m && m.AwayPenaltyGoals;
   const onPens = hpen !== '' && hpen != null && apen !== '' && apen != null;
-  const winner = played ? (m.Winner || (hg !== ag ? (hg > ag ? m.HomeTeam : m.AwayTeam) : '')) : '';
-  const homeS = STATE.stats.get(m.HomeTeam);
-  const awayS = STATE.stats.get(m.AwayTeam);
-  const homeOwner = (homeS && homeS.participant) || '';
-  const awayOwner = (awayS && awayS.participant) || '';
+  const winner = played ? ((m.Winner) || (hg !== ag ? (hg > ag ? homeTeam : awayTeam) : '')) : '';
 
-  const teamRow = (team, flag, owner, goals, isWinner, isLoser) => `
-    <div class="bracket-team ${isWinner ? 'is-winner' : ''} ${isLoser ? 'is-loser' : ''}">
-      <span class="bracket-flag">${flag}</span>
-      <span class="bracket-name">${escapeHtml(team)}</span>
-      <span class="bracket-owner">${escapeHtml(owner || '—')}</span>
-      <span class="bracket-goals">${played ? goals : '·'}</span>
-    </div>`;
+  // Each side renders independently: a known team (with flag + owner), or a
+  // TBD placeholder when its feeder match hasn't been decided yet. This lets
+  // a half-known tie show "Canada vs TBD" the instant one feeder finishes.
+  const teamRow = (team, goals) => {
+    if (!team) {
+      return `<div class="bracket-team is-tbd"><span class="bracket-flag muted">·</span><span class="bracket-name muted">TBD</span><span class="bracket-owner"></span><span class="bracket-goals muted">·</span></div>`;
+    }
+    const s = STATE.stats.get(team);
+    const owner = (s && s.participant) || '';
+    const isWinner = winner === team;
+    const isLoser = !!winner && !isWinner;
+    return `
+      <div class="bracket-team ${isWinner ? 'is-winner' : ''} ${isLoser ? 'is-loser' : ''}">
+        <span class="bracket-flag">${flagFor(team)}</span>
+        <span class="bracket-name">${escapeHtml(team)}</span>
+        <span class="bracket-owner">${escapeHtml(owner || '—')}</span>
+        <span class="bracket-goals">${played ? goals : '·'}</span>
+      </div>`;
+  };
 
-  const homeFlag = m.HomeFlagEmoji || flagFor(m.HomeTeam);
-  const awayFlag = m.AwayFlagEmoji || flagFor(m.AwayTeam);
-  const homeIsWinner = winner === m.HomeTeam;
-  const awayIsWinner = winner === m.AwayTeam;
-  const homeIsLoser = !!winner && !homeIsWinner;
-  const awayIsLoser = !!winner && !awayIsWinner;
-
+  const dateTitle = m && m.Date ? ' · ' + fmtShortDate(m.Date) : '';
   return `
-    <div class="bracket-match ${played ? 'played' : 'pending'} ${onPens ? 'on-pens' : ''}" title="${escapeHtml(stage + ' · ' + fmtShortDate(m.Date))}">
-      ${teamRow(m.HomeTeam, homeFlag, homeOwner, hg, homeIsWinner, homeIsLoser)}
-      ${teamRow(m.AwayTeam, awayFlag, awayOwner, ag, awayIsWinner, awayIsLoser)}
+    <div class="bracket-match ${played ? 'played' : 'pending'} ${onPens ? 'on-pens' : ''}" title="${escapeHtml(stage + dateTitle)}">
+      ${teamRow(homeTeam, hg)}
+      ${teamRow(awayTeam, ag)}
       ${onPens ? `<div class="bracket-pens">${hpen}-${apen} on pens</div>` : ''}
     </div>`;
 }
