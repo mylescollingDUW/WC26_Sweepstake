@@ -879,6 +879,7 @@ main {
   display: flex;
   flex-direction: column;
   min-width: 220px;
+  position: relative;
 }
 .bracket-round-head {
   display: flex;
@@ -899,10 +900,19 @@ main {
 .bracket-round-body {
   display: flex;
   flex-direction: column;
-  justify-content: space-around;
-  gap: var(--s-3);
   flex: 1;
 }
+/* Each slot is an equal-height band with its card centred. Because every
+   round has half the slots of the one before, each card lands exactly on the
+   mid-point of its feeder pair — the classic pure-flex bracket alignment. */
+.bracket-slot {
+  flex: 1 1 auto;          /* base = card height, then grow equally to fill */
+  display: flex;
+  align-items: center;
+  position: relative;
+  padding: 5px 0;          /* breathing room between cards in a packed round */
+}
+.bracket-slot .bracket-match { width: 100%; }
 .bracket-match {
   position: relative;
   background: var(--card);
@@ -914,44 +924,52 @@ main {
   transition: border-color var(--dur-2) var(--ease);
 }
 .bracket-match.played { border-color: var(--ink-3); }
-.bracket-match.tbd { border-style: dashed; padding: 6px 10px; gap: 1px; }
-.bracket-match.tbd .bracket-team { padding: 1px 0; font-size: 11px; grid-template-columns: 22px 1fr; gap: 6px; }
-.bracket-match.tbd .bracket-team > :nth-child(3),
-.bracket-match.tbd .bracket-team > :nth-child(4) { display: none; }
-.bracket-match.bracket-empty {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  align-self: center;
-  padding: var(--s-3) var(--s-4);
+/* A slot whose teams are both still unknown reads as a faint dashed
+   placeholder, so empty rounds hold their shape without shouting. */
+.bracket-match.is-empty {
+  border-style: dashed;
+  border-color: var(--rule-2);
   background: transparent;
 }
-.bracket-match.bracket-empty .bracket-team {
-  display: block;
-  text-align: center;
-  font-family: var(--font-mono);
-  font-size: 10px;
-  letter-spacing: 1.2px;
-  text-transform: uppercase;
-  color: var(--ink-4);
-}
-.bracket-match.bracket-empty .bracket-name { font-style: normal; font-weight: 500; }
 .bracket-match:hover { border-color: var(--ink); }
-.bracket-match.bracket-empty:hover { border-color: var(--rule-2); }
-.bracket-match::after,
-.bracket-match::before {
+.bracket-match.is-empty:hover { border-color: var(--rule-2); }
+
+/* ---- connector elbows, drawn in each round's right-hand gap ---- */
+/* horizontal line: card right edge → middle of the gap */
+.bracket-round:not(:last-child) .bracket-round-body > .bracket-slot::after {
   content: "";
   position: absolute;
   top: 50%;
+  left: 100%;
+  width: calc(var(--s-6) / 2);
   height: 1px;
   background: var(--rule-2);
 }
-.bracket-match::after  { right: calc(-1 * var(--s-6) / 2 - 1px); width: calc(var(--s-6) / 2 + 1px); }
-.bracket-match::before { left:  calc(-1 * var(--s-6) / 2 - 1px); width: calc(var(--s-6) / 2 + 1px); }
-.bracket-round:first-child .bracket-match::before,
-.bracket-round:last-child  .bracket-match::after { display: none; }
-.bracket-match.played::after,
-.bracket-match.played::before { background: var(--ink-3); }
+/* vertical line: joins each feeder pair at the middle of the gap (drawn on
+   the top slot of the pair, spanning down to its sibling's centre) */
+.bracket-round:not(:last-child) .bracket-round-body > .bracket-slot:nth-child(odd)::before {
+  content: "";
+  position: absolute;
+  top: 50%;
+  left: calc(100% + var(--s-6) / 2);
+  width: 1px;
+  height: 100%;
+  background: var(--rule-2);
+}
+/* incoming line: middle of the previous gap → this card's left edge */
+.bracket-round:not(:first-child) .bracket-round-body > .bracket-slot > .bracket-match::before {
+  content: "";
+  position: absolute;
+  top: 50%;
+  right: 100%;
+  width: calc(var(--s-6) / 2);
+  height: 1px;
+  background: var(--rule-2);
+}
+/* darken the line leaving a decided match */
+.bracket-round:not(:last-child) .bracket-round-body > .bracket-slot.is-played::after {
+  background: var(--ink-4);
+}
 
 .bracket-team {
   display: grid;
@@ -1013,17 +1031,25 @@ main {
   margin-top: 2px;
   text-transform: uppercase;
 }
-.bracket-aside {
-  margin-top: var(--s-5);
-  max-width: 280px;
-  padding-top: var(--s-4);
-  border-top: 1px solid var(--rule-2);
+/* 3rd-place play-off: a small box anchored at the foot of the Final column. */
+.bracket-third {
+  position: absolute;
+  bottom: 0;
+  left: 0;
+  right: 0;
 }
-.bracket-aside .bracket-round-head {
-  margin-bottom: var(--s-3);
+.bracket-third-label {
+  font-family: var(--font-mono);
+  font-size: var(--fs-2xs);
+  text-transform: uppercase;
+  letter-spacing: 1.5px;
+  color: var(--ink-3);
+  margin-bottom: var(--s-2);
+  padding-bottom: var(--s-2);
+  border-bottom: 1px solid var(--rule-2);
 }
-.bracket-aside .bracket-match::after,
-.bracket-aside .bracket-match::before { display: none; }
+.bracket-third .bracket-slot { padding: 0; }
+.bracket-third .bracket-match::before { display: none; } /* no feeder line */
 
 /* ------------------------------------------------------------
    Prize cards

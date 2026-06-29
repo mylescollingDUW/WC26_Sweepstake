@@ -2234,11 +2234,12 @@ function renderBracket() {
   if (STATE.phase === 'group') { section.hidden = true; return; }
   section.hidden = false;
 
+  const third = STATE.matches.find(m => canonicalStage(m.Stage) === 'Third Place');
+
   const roundsHtml = BRACKET_ROUNDS.map(stage => {
-    // Order by Sheet row (MatchID is assigned by row index, zero-padded
-    // so a string sort == row order). The workbook lists each knockout
-    // round top-to-bottom in bracket order, NOT by date, so we honour that
-    // rather than re-sorting by kick-off time.
+    // Order by Sheet row (MatchID is assigned by row index, zero-padded so a
+    // string sort == row order). The workbook lists each knockout round
+    // top-to-bottom in bracket order, NOT by date, so we honour that.
     const fixtures = STATE.matches
       .filter(m => canonicalStage(m.Stage) === stage)
       .sort((a, b) => String(a.MatchID).localeCompare(String(b.MatchID)));
@@ -2247,41 +2248,32 @@ function renderBracket() {
                        : stage === 'Quarter-finals' ? 4
                        : stage === 'Semi-finals' ? 2
                        : 1;
-    // A round shows its individual slots as soon as ANY team in it is known
-    // (one feeder decided → "Canada vs TBD"). While a round is entirely
-    // unknown it stays collapsed as a single compact "N matches TBD".
-    const anyKnown = fixtures.some(f => f.HomeTeam || f.AwayTeam);
-    let cards;
-    if (anyKnown) {
-      cards = fixtures.map(m => bracketMatchCard(m, stage)).join('');
-    } else {
-      cards = `<div class="bracket-match tbd bracket-empty"><div class="bracket-team"><span class="bracket-name muted">${expectedCount} match${expectedCount === 1 ? '' : 'es'} TBD</span></div></div>`;
-    }
+    // Always draw every slot so the full bracket shape shows from the start;
+    // unknown teams render as TBD and fill in as results land. Each card sits
+    // in an equal-height slot so rounds auto-align to their feeder pairs.
+    const slots = fixtures
+      .map(m => `<div class="bracket-slot${hasResult(m) ? ' is-played' : ''}">${bracketMatchCard(m, stage)}</div>`)
+      .join('');
+    // The 3rd-place play-off rides at the foot of the Final column as a small
+    // labelled box rather than a detached aside.
+    const thirdBlock = (stage === 'Final' && third)
+      ? `<div class="bracket-third">
+           <div class="bracket-third-label">3rd place</div>
+           <div class="bracket-slot">${bracketMatchCard(third, 'Third Place')}</div>
+         </div>`
+      : '';
     return `
       <div class="bracket-round" data-stage="${escapeHtml(stage)}">
         <div class="bracket-round-head">
           <span class="bracket-round-name">${escapeHtml(stage)}</span>
           <span class="bracket-round-meta">${fixtures.filter(hasResult).length}/${expectedCount}</span>
         </div>
-        <div class="bracket-round-body">${cards}</div>
+        <div class="bracket-round-body">${slots}</div>
+        ${thirdBlock}
       </div>`;
   }).join('');
 
-  // 3rd place play-off, shown as an aside.
-  const third = STATE.matches.find(m => canonicalStage(m.Stage) === 'Third Place');
-  // Only surface the 3rd-place play-off once at least one finalist-loser is
-  // known — otherwise its all-TBD row is just noise before the semis.
-  const thirdKnown = third && (third.HomeTeam || third.AwayTeam);
-  const thirdHtml = thirdKnown ? `
-    <div class="bracket-aside">
-      <div class="bracket-round-head">
-        <span class="bracket-round-name">3rd Place</span>
-        <span class="bracket-round-meta">${hasResult(third) ? '1/1' : '0/1'}</span>
-      </div>
-      ${bracketMatchCard(third, 'Third Place')}
-    </div>` : '';
-
-  root.innerHTML = `<div class="bracket">${roundsHtml}</div>${thirdHtml}`;
+  root.innerHTML = `<div class="bracket">${roundsHtml}</div>`;
 }
 
 function bracketMatchCard(m, stage) {
@@ -2314,8 +2306,9 @@ function bracketMatchCard(m, stage) {
   };
 
   const dateTitle = m && m.Date ? ' · ' + fmtShortDate(m.Date) : '';
+  const isEmpty = !homeTeam && !awayTeam;
   return `
-    <div class="bracket-match ${played ? 'played' : 'pending'} ${onPens ? 'on-pens' : ''}" title="${escapeHtml(stage + dateTitle)}">
+    <div class="bracket-match ${played ? 'played' : 'pending'} ${isEmpty ? 'is-empty' : ''} ${onPens ? 'on-pens' : ''}" title="${escapeHtml(stage + dateTitle)}">
       ${teamRow(homeTeam, hg)}
       ${teamRow(awayTeam, ag)}
       ${onPens ? `<div class="bracket-pens">${hpen}-${apen} on pens</div>` : ''}
