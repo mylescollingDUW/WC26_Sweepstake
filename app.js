@@ -754,6 +754,13 @@ function eliminationStageLabel(stage) {
   return c || 'Out';
 }
 
+// Honour the Sheet's "Winning Team" only when it actually names one of the
+// two teams. Anything else — a "Draw" written for a drawn group game, a
+// stray typo — is ignored, so neither side gets mis-marked as winner/loser.
+function validWinner(m) {
+  return (m && (m.Winner === m.HomeTeam || m.Winner === m.AwayTeam)) ? m.Winner : '';
+}
+
 // Decide a knockout tie's winner/loser. Prefers an explicit "Winning
 // Team" (covers ties settled on penalties), else falls back to the
 // score. Returns null when level with no recorded winner — undecided,
@@ -1199,7 +1206,7 @@ function renderTicker() {
     const stageShort = stageBadge(stage);
     const hg = n(m.HomeGoals), ag = n(m.AwayGoals);
     const hpen = m.HomePenaltyGoals, apen = m.AwayPenaltyGoals;
-    const winner = m.Winner || (hg > ag ? m.HomeTeam : ag > hg ? m.AwayTeam : '');
+    const winner = validWinner(m) || (hg > ag ? m.HomeTeam : ag > hg ? m.AwayTeam : '');
     const tags = [];
     if (n(m.HomeRedCards) + n(m.AwayRedCards) > 0) tags.push(['red', 'RED']);
     if (n(m.HomePenaltiesConceded) + n(m.AwayPenaltiesConceded) > 0) tags.push(['pen', 'PEN']);
@@ -1401,7 +1408,7 @@ function renderKnockoutPanel(stageKey, shortLabel) {
     const played = hasResult(m);
     const hg = n(m.HomeGoals), ag = n(m.AwayGoals);
     const hpen = m.HomePenaltyGoals, apen = m.AwayPenaltyGoals;
-    const explicitWinner = m.Winner;
+    const explicitWinner = validWinner(m);
     const winner = explicitWinner || (played && hg !== ag ? (hg > ag ? m.HomeTeam : m.AwayTeam) : '');
     const homeS = STATE.stats.get(m.HomeTeam);
     const awayS = STATE.stats.get(m.AwayTeam);
@@ -2124,7 +2131,7 @@ function spotlightMatchBody(m, spot) {
 
   const hg = n(m.HomeGoals), ag = n(m.AwayGoals);
   const hpen = m.HomePenaltyGoals, apen = m.AwayPenaltyGoals;
-  const winner = m.Winner || (hasResult(m) && hg !== ag ? (hg > ag ? m.HomeTeam : m.AwayTeam) : '');
+  const winner = validWinner(m) || (hasResult(m) && hg !== ag ? (hg > ag ? m.HomeTeam : m.AwayTeam) : '');
 
   let centre;
   if (hasResult(m)) {
@@ -2288,7 +2295,7 @@ function bracketMatchCard(m, stage) {
   const hg = n(m && m.HomeGoals), ag = n(m && m.AwayGoals);
   const hpen = m && m.HomePenaltyGoals, apen = m && m.AwayPenaltyGoals;
   const onPens = hpen !== '' && hpen != null && apen !== '' && apen != null;
-  const winner = played ? ((m.Winner) || (hg !== ag ? (hg > ag ? homeTeam : awayTeam) : '')) : '';
+  const winner = played ? (validWinner(m) || (hg !== ag ? (hg > ag ? homeTeam : awayTeam) : '')) : '';
 
   // Each side renders independently: a known team (with flag + owner), or a
   // TBD placeholder when its feeder match hasn't been decided yet. This lets
