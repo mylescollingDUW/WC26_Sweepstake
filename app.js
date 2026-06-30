@@ -1029,6 +1029,11 @@ function buildState({ participants, matches, awards: awardRows, goldenBoot: gbRo
       }
       const homeScore = r['Home Score'] === '' || r['Home Score'] == null ? '' : Number(r['Home Score']);
       const awayScore = r['Away Score'] === '' || r['Away Score'] == null ? '' : Number(r['Away Score']);
+      // Shootout score (knockout ties settled on penalties). Blank for every
+      // other match; present only when the "Home Pens"/"Away Pens" columns are
+      // filled. The match's Winning Team column still drives who advances.
+      const homePens = r['Home Pens'] === '' || r['Home Pens'] == null ? '' : Number(r['Home Pens']);
+      const awayPens = r['Away Pens'] === '' || r['Away Pens'] == null ? '' : Number(r['Away Pens']);
       return {
         MatchID: 'M' + String(i + 1).padStart(3, '0'),
         Date: matchDate,
@@ -1042,8 +1047,8 @@ function buildState({ participants, matches, awards: awardRows, goldenBoot: gbRo
         HomeGoals: isFinite(homeScore) ? homeScore : '',
         AwayGoals: isFinite(awayScore) ? awayScore : '',
         Minutes: minutes,
-        HomePenaltyGoals: '',
-        AwayPenaltyGoals: '',
+        HomePenaltyGoals: isFinite(homePens) ? homePens : '',
+        AwayPenaltyGoals: isFinite(awayPens) ? awayPens : '',
         HomeShots:        n(r['Home Shots']),
         AwayShots:        n(r['Away Shots']),
         HomeSoT:          n(r['Home SoT']),
