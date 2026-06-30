@@ -1022,15 +1022,17 @@ main {
 .bracket-team.is-loser  .bracket-name,
 .bracket-team.is-loser  .bracket-goals { color: var(--ink-4); }
 .bracket-team.is-loser  .bracket-name { text-decoration: line-through; }
-.bracket-pens {
+/* Shootout score shown inline beside the goals, e.g. "1 (3)" — keeps the
+   accent colour whether the row is the winner or the loser. */
+.bracket-pen {
+  margin-left: 3px;
   font-family: var(--font-mono);
   font-size: 10px;
+  font-weight: 500;
   color: var(--info);
-  letter-spacing: 0.5px;
-  text-align: right;
-  margin-top: 2px;
-  text-transform: uppercase;
 }
+.bracket-team.is-winner .bracket-pen,
+.bracket-team.is-loser  .bracket-pen { color: var(--info); }
 /* 3rd-place play-off: a small box anchored at the foot of the Final column. */
 .bracket-third {
   position: absolute;

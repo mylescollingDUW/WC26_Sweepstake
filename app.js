@@ -2300,7 +2300,7 @@ function bracketMatchCard(m, stage) {
   // Each side renders independently: a known team (with flag + owner), or a
   // TBD placeholder when its feeder match hasn't been decided yet. This lets
   // a half-known tie show "Canada vs TBD" the instant one feeder finishes.
-  const teamRow = (team, goals) => {
+  const teamRow = (team, goals, pen) => {
     if (!team) {
       return `<div class="bracket-team is-tbd"><span class="bracket-flag muted">·</span><span class="bracket-name muted">TBD</span><span class="bracket-owner"></span><span class="bracket-goals muted">·</span></div>`;
     }
@@ -2308,12 +2308,15 @@ function bracketMatchCard(m, stage) {
     const owner = (s && s.participant) || '';
     const isWinner = winner === team;
     const isLoser = !!winner && !isWinner;
+    // Shootout score sits in parentheses beside the goals (e.g. "1 (3)"), so a
+    // tie settled on penalties never adds a row — every card stays one height.
+    const penStr = onPens ? `<span class="bracket-pen">(${pen})</span>` : '';
     return `
       <div class="bracket-team ${isWinner ? 'is-winner' : ''} ${isLoser ? 'is-loser' : ''}">
         <span class="bracket-flag">${flagFor(team)}</span>
         <span class="bracket-name">${escapeHtml(team)}</span>
         <span class="bracket-owner">${escapeHtml(owner || '—')}</span>
-        <span class="bracket-goals">${played ? goals : '·'}</span>
+        <span class="bracket-goals">${played ? goals : '·'}${penStr}</span>
       </div>`;
   };
 
@@ -2321,9 +2324,8 @@ function bracketMatchCard(m, stage) {
   const isEmpty = !homeTeam && !awayTeam;
   return `
     <div class="bracket-match ${played ? 'played' : 'pending'} ${isEmpty ? 'is-empty' : ''} ${onPens ? 'on-pens' : ''}" title="${escapeHtml(stage + dateTitle)}">
-      ${teamRow(homeTeam, hg)}
-      ${teamRow(awayTeam, ag)}
-      ${onPens ? `<div class="bracket-pens">${hpen}-${apen} on pens</div>` : ''}
+      ${teamRow(homeTeam, hg, hpen)}
+      ${teamRow(awayTeam, ag, apen)}
     </div>`;
 }
 
